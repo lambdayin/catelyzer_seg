@@ -30,6 +30,11 @@ def parse_args():
     parser.add_argument('--min-solidity', default=0.6, type=float, help="最小实心度阈值")
     parser.add_argument('--edge-threshold', default=50, type=int, help="边缘区域阈值(像素)")
     
+    # 连通域合并参数
+    parser.add_argument('--merge-distance', default=20, type=int, help="连通域合并距离阈值")
+    parser.add_argument('--merge-angle-threshold', default=30, type=float, help="连通域合并角度阈值(度)")
+    parser.add_argument('--enable-component-merge', action='store_true', help="启用智能连通域合并")
+    
     return parser.parse_args()
 
 
@@ -115,6 +120,178 @@ def filter_small_components(mask, min_area):
     return filtered_mask
 
 
+def calculate_component_orientation(contour):
+    """
+    计算连通域的主方向角度
+    """
+    if len(contour) < 5:
+        return 0
+    
+    # 使用最小外接矩形的角度
+    min_rect = cv2.minAreaRect(contour)
+    angle = min_rect[2]
+    
+    # 标准化角度到-45到45度之间
+    if angle < -45:
+        angle += 90
+    elif angle > 45:
+        angle -= 90
+    
+    return angle
+
+
+def should_merge_components(comp1, comp2, merge_distance, angle_threshold):
+    """
+    判断两个连通域是否应该合并
+    基于距离、角度和形状相似性
+    """
+    # 计算中心点距离
+    center1 = comp1['center']
+    center2 = comp2['center']
+    distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+    
+    if distance > merge_distance:
+        return False
+    
+    # 计算方向角度差
+    angle1 = calculate_component_orientation(comp1['contour'])
+    angle2 = calculate_component_orientation(comp2['contour'])
+    angle_diff = abs(angle1 - angle2)
+    angle_diff = min(angle_diff, 180 - angle_diff)  # 处理角度环形差值
+    
+    if angle_diff > angle_threshold:
+        return False
+    
+    # 检查面积比例（避免合并过大差异的组件）
+    area1, area2 = comp1['area'], comp2['area']
+    area_ratio = max(area1, area2) / min(area1, area2)
+    
+    if area_ratio > 5:  # 面积差异过大
+        return False
+    
+    return True
+
+
+def merge_connected_components(components_info, merge_distance, angle_threshold):
+    """
+    智能合并连通域
+    合并可能属于同一催化剂的分离连通域
+    """
+    if not components_info:
+        return components_info
+    
+    # 使用并查集进行连通域合并
+    n = len(components_info)
+    parent = list(range(n))
+    
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+    
+    # 检查每对连通域是否需要合并
+    for i in range(n):
+        for j in range(i+1, n):
+            if should_merge_components(components_info[i], components_info[j], 
+                                     merge_distance, angle_threshold):
+                union(i, j)
+    
+    # 按合并组重新组织连通域
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(i)
+    
+    # 合并每个组的连通域
+    merged_components = []
+    for group_indices in groups.values():
+        if len(group_indices) == 1:
+            # 单个连通域，直接添加
+            merged_components.append(components_info[group_indices[0]])
+        else:
+            # 多个连通域需要合并
+            merged_component = merge_component_group(
+                [components_info[i] for i in group_indices]
+            )
+            merged_components.append(merged_component)
+    
+    return merged_components
+
+
+def merge_component_group(component_group):
+    """
+    合并一组连通域为单个连通域
+    """
+    if len(component_group) == 1:
+        return component_group[0]
+    
+    # 合并所有轮廓点
+    all_points = []
+    total_area = 0
+    
+    for comp in component_group:
+        all_points.extend(comp['contour'].reshape(-1, 2))
+        total_area += comp['area']
+    
+    # 重新计算凸包
+    all_points = np.array(all_points)
+    hull = cv2.convexHull(all_points.reshape(-1, 1, 2))
+    
+    # 重新计算特征
+    area = total_area
+    min_rect = cv2.minAreaRect(hull)
+    width, height = min_rect[1]
+    
+    if width == 0 or height == 0:
+        aspect_ratio = 1.0
+    else:
+        aspect_ratio = max(width, height) / min(width, height)
+    
+    # 计算边界框
+    x, y, w, h = cv2.boundingRect(hull)
+    
+    # 计算实心度
+    hull_area = cv2.contourArea(hull)
+    solidity = area / hull_area if hull_area > 0 else 0
+    
+    # 计算圆形度
+    perimeter = cv2.arcLength(hull, True)
+    circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+    
+    # 计算中心点
+    moments = cv2.moments(hull)
+    if moments['m00'] != 0:
+        center_x = int(moments['m10'] / moments['m00'])
+        center_y = int(moments['m01'] / moments['m00'])
+    else:
+        center_x, center_y = x + w//2, y + h//2
+    
+    # 创建合并后的mask
+    merged_mask = np.zeros_like(component_group[0]['mask'])
+    for comp in component_group:
+        merged_mask = cv2.bitwise_or(merged_mask, comp['mask'])
+    
+    return {
+        'label': component_group[0]['label'],  # 使用第一个组件的标签
+        'area': area,
+        'aspect_ratio': aspect_ratio,
+        'solidity': solidity,
+        'circularity': circularity,
+        'center': (center_x, center_y),
+        'bbox': (x, y, w, h),
+        'min_rect': min_rect,
+        'contour': hull,
+        'mask': merged_mask
+    }
+
+
 def analyze_connected_components(mask):
     """
     连通域分析和特征提取
@@ -187,7 +364,8 @@ def analyze_connected_components(mask):
 
 def classify_anomalies(components_info, image_shape, args):
     """
-    异常区域分类：区分正常催化剂、异物、异形
+    优化的异常区域分类：区分正常催化剂、异物、异形
+    采用更宽松的判断条件减少误报
     """
     height, width = image_shape[:2]
     normal_components = []
@@ -198,55 +376,69 @@ def classify_anomalies(components_info, image_shape, args):
     edge_threshold = args.edge_threshold
     
     for comp in components_info:
-        is_anomaly = False
+        anomaly_score = 0
         anomaly_reasons = []
         
-        # 1. 尺寸异常检测
-        if comp['area'] < args.min_area:
-            is_anomaly = True
+        # 1. 尺寸异常检测（使用评分制度而非硬阈值）
+        if comp['area'] < args.min_area * 0.7:  # 更宽松的面积阈值
+            anomaly_score += 2
             anomaly_reasons.append('area is too small')
-        elif comp['area'] > args.max_area:
-            is_anomaly = True
+        elif comp['area'] > args.max_area * 1.2:  # 更宽松的面积阈值
+            anomaly_score += 2
             anomaly_reasons.append('area is too large')
+        elif comp['area'] < args.min_area:
+            anomaly_score += 1  # 轻微异常
+            anomaly_reasons.append('area is slightly small')
         
-        # 2. 形状异常检测
-        if comp['aspect_ratio'] < args.min_aspect_ratio:
-            is_anomaly = True
+        # 2. 形状异常检测（更宽松的长宽比）
+        if comp['aspect_ratio'] < args.min_aspect_ratio * 0.8:  # 更宽松
+            anomaly_score += 2
             anomaly_reasons.append('aspect ratio is too small')
-        elif comp['aspect_ratio'] > args.max_aspect_ratio:
-            is_anomaly = True
+        elif comp['aspect_ratio'] > args.max_aspect_ratio * 1.2:  # 更宽松
+            anomaly_score += 2
             anomaly_reasons.append('aspect ratio is too large')
+        elif comp['aspect_ratio'] < args.min_aspect_ratio:
+            anomaly_score += 1  # 轻微异常
+            anomaly_reasons.append('aspect ratio is slightly small')
         
-        # 3. 实心度异常检测
-        if comp['solidity'] < args.min_solidity:
-            is_anomaly = True
+        # 3. 实心度异常检测（更宽松的实心度）
+        if comp['solidity'] < args.min_solidity * 0.8:  # 更宽松
+            anomaly_score += 2
             anomaly_reasons.append('shape is irregular')
+        elif comp['solidity'] < args.min_solidity:
+            anomaly_score += 1  # 轻微异常
+            anomaly_reasons.append('shape is slightly irregular')
         
-        # 4. 位置异常检测(边缘区域)
-        # center_x, center_y = comp['center']
-        # if (center_x < edge_threshold or center_x > width - edge_threshold or
-        #     center_y < edge_threshold or center_y > height - edge_threshold):
-        #     is_anomaly = True
-        #     anomaly_reasons.append('located in the edge region')
-        
-        # 5. 圆形度异常检测(过于圆形可能是异物)
-        if comp['circularity'] > 0.7:  # 圆形度过高
-            is_anomaly = True
+        # 4. 圆形度异常检测（更严格的圆形度阈值）
+        if comp['circularity'] > 0.8:  # 提高阈值，减少误报
+            anomaly_score += 2
             anomaly_reasons.append('shape is too circular')
+        elif comp['circularity'] > 0.7:
+            anomaly_score += 1  # 轻微异常
+            anomaly_reasons.append('shape is slightly circular')
         
-        # 分类逻辑
+        # 5. 综合评分判断
+        comp['anomaly_score'] = anomaly_score
         comp['anomaly_reasons'] = anomaly_reasons
         
-        if not is_anomaly:
+        # 使用评分制度进行分类
+        if anomaly_score <= 1:  # 正常或轻微异常
             normal_components.append(comp)
-        else:
+        elif anomaly_score >= 3:  # 明显异常
             # 区分异物和异形催化剂
-            if (comp['area'] < args.min_area * 2 or  # 面积很小
-                comp['circularity'] > 0.6 or         # 比较圆
+            if (comp['area'] < args.min_area * 1.5 or  # 面积较小
+                comp['circularity'] > 0.7 or          # 较圆
                 'shape is too circular' in anomaly_reasons):
                 foreign_objects.append(comp)
             else:
                 deformed_catalysts.append(comp)
+        else:  # 中等异常 (score = 2)
+            # 更保守的分类，倾向于归类为正常
+            if (comp['circularity'] > 0.8 or  # 只有非常圆的才认为是异物
+                comp['area'] < args.min_area * 0.5):  # 或者面积极小
+                foreign_objects.append(comp)
+            else:
+                normal_components.append(comp)  # 归类为正常
     
     return {
         'normal': normal_components,
@@ -285,6 +477,12 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     
     # 连通域分析
     components_info = analyze_connected_components(mask_filtered)
+    
+    # 智能连通域合并（可选）
+    if args.enable_component_merge:
+        components_info = merge_connected_components(
+            components_info, args.merge_distance, args.merge_angle_threshold
+        )
     
     # 异常分类
     classification_result = classify_anomalies(components_info, original_image.shape, args)
@@ -515,6 +713,10 @@ def main():
     print(f"  长宽比范围: {args.min_aspect_ratio} - {args.max_aspect_ratio}")
     print(f"  最小实心度: {args.min_solidity}")
     print(f"  边缘阈值: {args.edge_threshold}")
+    print(f"  智能合并: {'启用' if args.enable_component_merge else '禁用'}")
+    if args.enable_component_merge:
+        print(f"  合并距离阈值: {args.merge_distance}")
+        print(f"  合并角度阈值: {args.merge_angle_threshold}度")
 
 
 if __name__ == '__main__':

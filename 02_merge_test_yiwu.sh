@@ -3,6 +3,11 @@
 # =================================================================
 # 催化剂异物异形检测脚本启动器 (merge_test_yiwu.py)
 # 一键启动催化剂异物异形检测功能
+# 
+# 新增功能:
+# - 智能连通域合并：解决UNet分割将单一催化剂分成多个小块的问题
+# - 优化异常判断：采用评分制度替代硬阈值，大幅降低误报率
+# - 小连通域过滤：去除折叠催化剂的小露出部分等噪声
 # =================================================================
 
 # 颜色定义
@@ -41,13 +46,18 @@ INPUT_DIR="./data/catalyst_merge/origin_data"
 OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0001"
 
 # 异物检测参数
-MIN_COMPONENT_AREA=500 # 连通域预过滤最小面积阈值
-MIN_AREA=0             # 最小连通域面积阈值
+MIN_COMPONENT_AREA=100 # 连通域预过滤最小面积阈值
+MIN_AREA=500           # 最小连通域面积阈值
 MAX_AREA=50000         # 最大连通域面积阈值
 MIN_ASPECT_RATIO=1.5   # 最小长宽比阈值
 MAX_ASPECT_RATIO=20.0  # 最大长宽比阈值
 MIN_SOLIDITY=0.6       # 最小实心度阈值
 EDGE_THRESHOLD=50      # 边缘区域阈值(像素)
+
+# 智能连通域合并参数
+ENABLE_COMPONENT_MERGE=true  # 启用智能连通域合并 (true/false)
+MERGE_DISTANCE=20            # 连通域合并距离阈值
+MERGE_ANGLE_THRESHOLD=30     # 连通域合并角度阈值(度)
 
 # 支持的图像格式
 IMAGE_EXTENSIONS="jpg jpeg png bmp tiff"
@@ -117,11 +127,19 @@ echo "  图像数量: $image_count 张"
 echo "  GPU设备: ${CUDA_DEVICE:-CPU模式}"
 echo ""
 print_info "检测参数:"
+echo "  连通域预过滤最小面积: $MIN_COMPONENT_AREA"
 echo "  最小面积阈值: $MIN_AREA"
 echo "  最大面积阈值: $MAX_AREA"
 echo "  长宽比范围: $MIN_ASPECT_RATIO - $MAX_ASPECT_RATIO"
 echo "  最小实心度: $MIN_SOLIDITY"
 echo "  边缘阈值: ${EDGE_THRESHOLD}px"
+echo ""
+print_info "智能合并参数:"
+echo "  启用智能合并: $ENABLE_COMPONENT_MERGE"
+if [ "$ENABLE_COMPONENT_MERGE" = "true" ]; then
+    echo "  合并距离阈值: $MERGE_DISTANCE"
+    echo "  合并角度阈值: ${MERGE_ANGLE_THRESHOLD}度"
+fi
 echo ""
 
 # 询问是否继续
@@ -151,14 +169,22 @@ echo "=================================="
 python_cmd="python merge_test_yiwu.py \"$MODEL_PATH\" \
     --input-dir \"$INPUT_DIR\" \
     --output-dir \"$OUTPUT_DIR\" \
+    --min-component-area $MIN_COMPONENT_AREA \
     --min-area $MIN_AREA \
     --max-area $MAX_AREA \
-    --min-component-area $MIN_COMPONENT_AREA \
     --min-aspect-ratio $MIN_ASPECT_RATIO \
     --max-aspect-ratio $MAX_ASPECT_RATIO \
     --min-solidity $MIN_SOLIDITY \
     --edge-threshold $EDGE_THRESHOLD \
     --image-exts $IMAGE_EXTENSIONS"
+
+# 添加智能合并参数
+if [ "$ENABLE_COMPONENT_MERGE" = "true" ]; then
+    python_cmd="$python_cmd \
+        --enable-component-merge \
+        --merge-distance $MERGE_DISTANCE \
+        --merge-angle-threshold $MERGE_ANGLE_THRESHOLD"
+fi
 
 # 记录开始时间
 start_time=$(date +%s)
@@ -216,4 +242,7 @@ echo "  - 🟢 绿色区域: 正常催化剂"
 echo ""
 echo "📊 可调节参数："
 echo "  - 如需调整检测灵敏度，请修改脚本中的检测参数"
+echo "  - 启用/禁用智能合并：修改 ENABLE_COMPONENT_MERGE 参数"
+echo "  - 合并距离调节：修改 MERGE_DISTANCE (推荐范围: 15-40)"
+echo "  - 合并角度调节：修改 MERGE_ANGLE_THRESHOLD (推荐范围: 20-45度)"
 echo "  - 详细参数说明请参考 异物检测使用说明.md" 
