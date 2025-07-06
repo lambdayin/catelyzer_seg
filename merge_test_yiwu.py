@@ -22,6 +22,7 @@ def parse_args():
                        help="支持的图像文件扩展名")
     
     # 异物检测参数
+    parser.add_argument('--min-component-area', default=100, type=int, help="连通域预过滤最小面积阈值")
     parser.add_argument('--min-area', default=500, type=int, help="最小连通域面积阈值")
     parser.add_argument('--max-area', default=50000, type=int, help="最大连通域面积阈值")
     parser.add_argument('--min-aspect-ratio', default=1.5, type=float, help="最小长宽比阈值")
@@ -86,6 +87,32 @@ def inference_unet_batch(net, device, image_path):
         mask = output.argmax(dim=1)
         output = (mask[0] * 255).squeeze().numpy().astype(np.uint8)
     return output
+
+
+def filter_small_components(mask, min_area):
+    """
+    过滤掉面积过小的连通域
+    用于在连通域分析前预处理，去除明显的噪声和小的误检区域
+    """
+    # 连通域标记
+    num_labels, labeled_mask = cv2.connectedComponents(mask)
+    
+    # 创建过滤后的掩码
+    filtered_mask = np.zeros_like(mask)
+    
+    # 遍历每个连通域（跳过背景label=0）
+    for label in range(1, num_labels):
+        # 创建当前连通域的掩码
+        component_mask = (labeled_mask == label).astype(np.uint8)
+        
+        # 计算连通域面积
+        area = cv2.countNonZero(component_mask)
+        
+        # 保留面积大于阈值的连通域
+        if area >= min_area:
+            filtered_mask[component_mask > 0] = 255
+    
+    return filtered_mask
 
 
 def analyze_connected_components(mask):
@@ -253,13 +280,16 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     # 使用闭运算填充内部的小孔洞
     # mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
     
+    # 过滤掉面积过小的连通域（去除折叠催化剂的小露出部分等噪声）
+    mask_filtered = filter_small_components(mask_clean, args.min_component_area)
+    
     # 连通域分析
-    components_info = analyze_connected_components(mask_clean)
+    components_info = analyze_connected_components(mask_filtered)
     
     # 异常分类
     classification_result = classify_anomalies(components_info, original_image.shape, args)
     
-    return classification_result, mask_clean
+    return classification_result, mask_filtered
 
 
 def visualize_results(original_image, classification_result, anomaly_mask):
@@ -479,6 +509,7 @@ def main():
             print(f"  - {file_path}: {error}")
     
     print(f"\n检测参数:")
+    print(f"  连通域预过滤最小面积: {args.min_component_area}")
     print(f"  最小面积阈值: {args.min_area}")
     print(f"  最大面积阈值: {args.max_area}")
     print(f"  长宽比范围: {args.min_aspect_ratio} - {args.max_aspect_ratio}")

@@ -41,7 +41,8 @@ INPUT_DIR="./data/catalyst_merge/origin_data"
 OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0001"
 
 # 异物检测参数
-MIN_AREA=0           # 最小连通域面积阈值
+MIN_COMPONENT_AREA=500 # 连通域预过滤最小面积阈值
+MIN_AREA=0             # 最小连通域面积阈值
 MAX_AREA=50000         # 最大连通域面积阈值
 MIN_ASPECT_RATIO=1.5   # 最小长宽比阈值
 MAX_ASPECT_RATIO=20.0  # 最大长宽比阈值
@@ -152,6 +153,7 @@ python_cmd="python merge_test_yiwu.py \"$MODEL_PATH\" \
     --output-dir \"$OUTPUT_DIR\" \
     --min-area $MIN_AREA \
     --max-area $MAX_AREA \
+    --min-component-area $MIN_COMPONENT_AREA \
     --min-aspect-ratio $MIN_ASPECT_RATIO \
     --max-aspect-ratio $MAX_ASPECT_RATIO \
     --min-solidity $MIN_SOLIDITY \
