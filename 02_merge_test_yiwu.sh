@@ -43,11 +43,11 @@ MODEL_PATH="./pretrained/twoimages_epoch1000.pth"
 
 # 输入输出目录
 INPUT_DIR="./data/catalyst_merge/origin_data"
-OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0001"
+OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0002_add_merge"
 
 # 异物检测参数
-MIN_COMPONENT_AREA=100 # 连通域预过滤最小面积阈值
-MIN_AREA=500           # 最小连通域面积阈值
+MIN_COMPONENT_AREA=200 # 连通域预过滤最小面积阈值
+MIN_AREA=500           # 最小连通域面积阈值=>预设，没有用到
 MAX_AREA=50000         # 最大连通域面积阈值
 MIN_ASPECT_RATIO=1.5   # 最小长宽比阈值
 MAX_ASPECT_RATIO=20.0  # 最大长宽比阈值
@@ -58,6 +58,14 @@ EDGE_THRESHOLD=50      # 边缘区域阈值(像素)
 ENABLE_COMPONENT_MERGE=true  # 启用智能连通域合并 (true/false)
 MERGE_DISTANCE=20            # 连通域合并距离阈值
 MERGE_ANGLE_THRESHOLD=30     # 连通域合并角度阈值(度)
+
+# 智能误报过滤参数
+ENABLE_FP_FILTER=true       # 启用智能误报过滤算法 (true/false)
+FP_DENSITY_THRESHOLD=0.4    # 误报判断密度阈值 (0.1-0.8, 越小越严格)
+FP_AREA_THRESHOLD=5000      # 误报判断面积阈值 (绝对像素值, 针对误报大区域)
+FP_SCORE_THRESHOLD=4       # 误报判断综合评分阈值 (1-5, 越小越严格)
+FP_REMOVE_MODE="remove"     # 误报处理模式: remove=直接去除, extract=提取内部组件
+SHOW_FALSE_POSITIVE=false   # 显示误报区域: true=在结果图中显示误报区域mask, false=不显示
 
 # 支持的图像格式
 IMAGE_EXTENSIONS="jpg jpeg png bmp tiff"
@@ -141,6 +149,16 @@ if [ "$ENABLE_COMPONENT_MERGE" = "true" ]; then
     echo "  合并角度阈值: ${MERGE_ANGLE_THRESHOLD}度"
 fi
 echo ""
+print_info "🚀 智能误报过滤参数 (新功能):"
+echo "  启用误报过滤: $ENABLE_FP_FILTER"
+if [ "$ENABLE_FP_FILTER" = "true" ]; then
+    echo "  处理模式: $FP_REMOVE_MODE (remove=直接去除, extract=提取内部组件)"
+    echo "  密度阈值: $FP_DENSITY_THRESHOLD (越小越严格)"
+    echo "  面积阈值: $FP_AREA_THRESHOLD (像素数，超过此值视为误报)"
+    echo "  综合评分阈值: $FP_SCORE_THRESHOLD (越小越严格)"
+    echo "  显示误报区域: $SHOW_FALSE_POSITIVE (true=在结果图中显示, false=不显示)"
+fi
+echo ""
 
 # 询问是否继续
 read -p "按回车键开始检测，或输入 'q' 退出: " confirm
@@ -184,6 +202,21 @@ if [ "$ENABLE_COMPONENT_MERGE" = "true" ]; then
         --enable-component-merge \
         --merge-distance $MERGE_DISTANCE \
         --merge-angle-threshold $MERGE_ANGLE_THRESHOLD"
+fi
+
+# 添加智能误报过滤参数
+if [ "$ENABLE_FP_FILTER" = "true" ]; then
+    python_cmd="$python_cmd \
+        --enable-false-positive-filter \
+        --fp-density-threshold $FP_DENSITY_THRESHOLD \
+        --fp-area-threshold $FP_AREA_THRESHOLD \
+        --fp-score-threshold $FP_SCORE_THRESHOLD \
+        --fp-remove-mode $FP_REMOVE_MODE"
+    
+    # 添加误报区域显示参数
+    if [ "$SHOW_FALSE_POSITIVE" = "true" ]; then
+        python_cmd="$python_cmd --show-false-positive"
+    fi
 fi
 
 # 记录开始时间
@@ -239,10 +272,20 @@ echo "🎨 颜色标注含义："
 echo "  - 🔴 红色区域: 检测到的异物"
 echo "  - 🟠 橙色区域: 检测到的异形催化剂"
 echo "  - 🟢 绿色区域: 正常催化剂"
+echo "  - 🟣 紫色区域: 误报区域 (仅在启用SHOW_FALSE_POSITIVE时显示)"
 echo ""
 echo "📊 可调节参数："
 echo "  - 如需调整检测灵敏度，请修改脚本中的检测参数"
 echo "  - 启用/禁用智能合并：修改 ENABLE_COMPONENT_MERGE 参数"
 echo "  - 合并距离调节：修改 MERGE_DISTANCE (推荐范围: 15-40)"
 echo "  - 合并角度调节：修改 MERGE_ANGLE_THRESHOLD (推荐范围: 20-45度)"
+echo ""
+echo "🚀 新功能 - 智能误报过滤（已优化）："
+echo "  - 启用/禁用误报过滤：修改 ENABLE_FP_FILTER 参数"
+echo "  - 处理模式选择：修改 FP_REMOVE_MODE (remove=直接去除, extract=提取内部组件)"
+echo "  - 密度阈值调节：修改 FP_DENSITY_THRESHOLD (0.1-0.8, 推荐0.3-0.5)"
+echo "  - 面积阈值调节：修改 FP_AREA_THRESHOLD (推荐100000-200000像素)"
+echo "  - 评分阈值调节：修改 FP_SCORE_THRESHOLD (1-5, 推荐2-4)"
+echo "  - 误报区域可视化：修改 SHOW_FALSE_POSITIVE (true=显示紫色半透明mask, false=不显示)"
+echo "  - 使用专门的误报面积阈值和最小外接矩形密度，精准识别误报"
 echo "  - 详细参数说明请参考 异物检测使用说明.md" 

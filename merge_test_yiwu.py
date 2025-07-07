@@ -35,6 +35,20 @@ def parse_args():
     parser.add_argument('--merge-angle-threshold', default=30, type=float, help="连通域合并角度阈值(度)")
     parser.add_argument('--enable-component-merge', action='store_true', help="启用智能连通域合并")
     
+    # 🚀 智能误报过滤参数
+    parser.add_argument('--enable-false-positive-filter', action='store_true', default=True, 
+                       help="启用智能误报过滤算法（默认启用）")
+    parser.add_argument('--fp-density-threshold', default=0.4, type=float, 
+                       help="误报判断密度阈值（越小越严格）")
+    parser.add_argument('--fp-area-threshold', default=150000, type=int,
+                       help="误报判断面积阈值（绝对值，适用于误报大区域）")
+    parser.add_argument('--fp-score-threshold', default=3, type=int, 
+                       help="误报判断综合评分阈值（越小越严格）")
+    parser.add_argument('--fp-remove-mode', choices=['extract', 'remove'], default='remove',
+                       help="误报处理模式：extract=提取内部组件，remove=直接去除（推荐）")
+    parser.add_argument('--show-false-positive', action='store_true', default=False,
+                       help="显示误报区域：启用时在结果图中以半透明mask显示检测到的误报区域")
+    
     return parser.parse_args()
 
 
@@ -307,13 +321,14 @@ def analyze_connected_components(mask):
         component_mask = (labeled_mask == label).astype(np.uint8)
         
         # 基本几何特征
-        area = cv2.countNonZero(component_mask)
+        # area = cv2.countNonZero(component_mask)
         contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if len(contours) == 0:
             continue
             
         contour = contours[0]
+        area = cv2.contourArea(contour)
         
         # 最小外接矩形
         min_rect = cv2.minAreaRect(contour)
@@ -362,6 +377,221 @@ def analyze_connected_components(mask):
     return components_info
 
 
+def calculate_region_density(component_mask):
+    """
+    计算连通域的密度特征
+    """
+    # 1. 最小外接矩形密度（更准确的密度计算）
+    # actual_area = np.sum(component_mask > 0)
+    contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if len(contours) > 0:
+        contour = contours[0]
+        actual_area = cv2.contourArea(contour)
+        # 使用最小外接矩形而不是正外接矩形，对倾斜物体更准确
+        min_rect = cv2.minAreaRect(contour)
+        min_rect_area = min_rect[1][0] * min_rect[1][1]  # width * height
+        bbox_density = actual_area / min_rect_area if min_rect_area > 0 else 0
+    else:
+        bbox_density = 0
+    
+    # 2. 轮廓复杂度分析
+    # 通过凸包缺陷(convexity defects)来评估轮廓的复杂程度
+    if len(contours) > 0:
+        contour = contours[0]
+        # 计算轮廓的convex defects
+        hull = cv2.convexHull(contour, returnPoints=False)
+        if len(hull) > 3 and len(contour) > 3:
+            try:
+                defects = cv2.convexityDefects(contour, hull)
+                complexity_score = len(defects) if defects is not None else 0
+            except:
+                complexity_score = 0
+        else:
+            complexity_score = 0
+    else:
+        complexity_score = 0
+    
+    return {
+        'bbox_density': bbox_density,
+        'complexity_score': complexity_score
+    }
+
+
+def is_false_positive_region(component_info, density_info, args):
+    """
+    判断连通域是否为UNet误报的大区域
+    
+    优化后的判断逻辑：
+    1. 使用专门的误报面积阈值，而不是基于正常催化剂max_area
+    2. 使用最小外接矩形密度，对倾斜催化剂更友好
+    3. 去除内部空洞检测，避免误杀有空洞的正常催化剂
+    4. 保留轮廓复杂度检测，识别真正不规则的误报区域
+    """
+    area = component_info['area']
+    bbox_density = density_info['bbox_density']
+    complexity_score = density_info['complexity_score']
+    
+    # 使用专门针对误报的判断阈值
+    is_oversized = area > args.fp_area_threshold  # 使用专门的误报面积阈值
+    is_low_density = bbox_density < args.fp_density_threshold  # 最小外接矩形密度过低
+    is_complex = complexity_score > 20  # 轮廓过于复杂
+    
+    # 综合判断逻辑
+    false_positive_score = 0
+    if is_oversized:
+        false_positive_score += 1  # 面积超过误报阈值
+    if is_low_density:
+        false_positive_score += 3  # 密度过低
+    if is_complex:
+        false_positive_score += 2  # 复杂度
+    
+    return false_positive_score >= args.fp_score_threshold  # 使用参数化阈值
+
+
+def extract_internal_components(false_positive_mask, args):
+    """
+    从误报的大区域中提取内部真正的催化剂组件
+    
+    核心算法：多尺度形态学分离
+    """
+    # 1. 使用开运算分离粘连的组件
+    # 逐步增大核的尺寸，直到能够有效分离
+    extracted_components = []
+    
+    for kernel_size in [3, 5, 7, 9]:
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        
+        # 开运算：先腐蚀后膨胀，分离粘连区域
+        opened_mask = cv2.morphologyEx(false_positive_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # 找到分离后的连通域
+        num_labels, labeled_mask = cv2.connectedComponents(opened_mask)
+        
+        for label in range(1, num_labels):
+            component_mask = (labeled_mask == label).astype(np.uint8)
+            area = cv2.countNonZero(component_mask)
+            
+            # 检查是否为合理尺寸的催化剂
+            if args.min_area * 0.5 <= area <= args.max_area:
+                # 计算基本特征
+                contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if len(contours) > 0:
+                    contour = contours[0]
+                    
+                    # 基本几何特征计算
+                    min_rect = cv2.minAreaRect(contour)
+                    width, height = min_rect[1]
+                    if width > 0 and height > 0:
+                        aspect_ratio = max(width, height) / min(width, height)
+                        
+                        # 检查长宽比是否合理
+                        if aspect_ratio <= args.max_aspect_ratio * 1.5:  # 稍微放宽标准
+                            x, y, w, h = cv2.boundingRect(contour)
+                            
+                            # 计算实心度
+                            hull = cv2.convexHull(contour)
+                            hull_area = cv2.contourArea(hull)
+                            solidity = area / hull_area if hull_area > 0 else 0
+                            
+                            # 计算圆形度
+                            perimeter = cv2.arcLength(contour, True)
+                            circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+                            
+                            # 中心点
+                            moments = cv2.moments(contour)
+                            if moments['m00'] != 0:
+                                center_x = int(moments['m10'] / moments['m00'])
+                                center_y = int(moments['m01'] / moments['m00'])
+                            else:
+                                center_x, center_y = x + w//2, y + h//2
+                            
+                            component_info = {
+                                'label': f'extracted_{label}_{kernel_size}',
+                                'area': area,
+                                'aspect_ratio': aspect_ratio,
+                                'solidity': solidity,
+                                'circularity': circularity,
+                                'center': (center_x, center_y),
+                                'bbox': (x, y, w, h),
+                                'min_rect': min_rect,
+                                'contour': contour,
+                                'mask': component_mask
+                            }
+                            
+                            extracted_components.append(component_info)
+        
+        # 如果当前尺寸已经能够有效分离，就不需要继续尝试更大的核
+        if len(extracted_components) > 0:
+            break
+    
+    return extracted_components
+
+
+def intelligent_component_filtering(components_info, args):
+    """
+    智能连通域过滤：识别并处理UNet误报的大区域
+    
+    这是核心创新算法，能够：
+    1. 识别UNet误报的大区域
+    2. 根据模式选择：直接去除 或 提取内部组件
+    3. 保留正常尺寸的连通域
+    4. 返回误报区域信息（用于可视化）
+    """
+    filtered_components = []
+    extracted_components = []
+    false_positive_regions = []  # 新增：保存误报区域信息
+    removed_count = 0
+    
+    mode_desc = "直接去除" if args.fp_remove_mode == 'remove' else "提取内部组件"
+    print(f"\n开始智能连通域过滤，初始连通域数量: {len(components_info)}")
+    print(f"误报处理模式: {mode_desc}")
+    print(f"误报区域可视化: {'启用' if args.show_false_positive else '禁用'}")
+    
+    for comp in components_info:
+        # 计算密度特征
+        density_info = calculate_region_density(comp['mask'])
+        
+        # 判断是否为误报大区域
+        if is_false_positive_region(comp, density_info, args):
+            print(f"🚫 检测到误报大区域: 面积={comp['area']}, 最小外接矩形密度={density_info['bbox_density']:.3f}, 轮廓复杂度={density_info['complexity_score']}")
+            
+            # 保存误报区域信息（用于可视化）
+            false_positive_regions.append({
+                'mask': comp['mask'],
+                'contour': comp['contour'],
+                'area': comp['area'],
+                'density': density_info['bbox_density'],
+                'complexity': density_info['complexity_score']
+            })
+            
+            if args.fp_remove_mode == 'remove':
+                # 直接去除误报区域
+                removed_count += 1
+                print(f"  ❌ 直接去除该误报区域")
+            else:
+                # 从误报区域中提取真实组件
+                internal_components = extract_internal_components(comp['mask'], args)
+                extracted_components.extend(internal_components)
+                print(f"  ✅ 从误报区域提取到 {len(internal_components)} 个内部组件")
+            
+        else:
+            # 保留正常连通域
+            filtered_components.append(comp)
+    
+    # 合并过滤后的连通域和提取的组件
+    final_components = filtered_components + extracted_components
+    
+    if args.fp_remove_mode == 'remove':
+        print(f"智能过滤完成: 保留正常组件 {len(filtered_components)} 个，去除误报区域 {removed_count} 个")
+    else:
+        print(f"智能过滤完成: 保留正常组件 {len(filtered_components)} 个，提取内部组件 {len(extracted_components)} 个")
+    
+    print(f"最终连通域数量: {len(final_components)}")
+    
+    return final_components, false_positive_regions
+
+
 def classify_anomalies(components_info, image_shape, args):
     """
     优化的异常区域分类：区分正常催化剂、异物、异形
@@ -380,15 +610,18 @@ def classify_anomalies(components_info, image_shape, args):
         anomaly_reasons = []
         
         # 1. 尺寸异常检测（使用评分制度而非硬阈值）
-        if comp['area'] < args.min_area * 0.7:  # 更宽松的面积阈值
-            anomaly_score += 2
-            anomaly_reasons.append('area is too small')
-        elif comp['area'] > args.max_area * 1.2:  # 更宽松的面积阈值
+        # if comp['area'] < args.min_area * 0.7:  # 更宽松的面积阈值
+        #     anomaly_score += 2
+        #     anomaly_reasons.append('area is too small')
+        # elif comp['area'] > args.max_area * 1.2:  # 更宽松的面积阈值
+        #     anomaly_score += 2
+        #     anomaly_reasons.append('area is too large')
+        # elif comp['area'] < args.min_area:
+        #     anomaly_score += 1  # 轻微异常
+        #     anomaly_reasons.append('area is slightly small')
+        if comp['area'] > args.max_area * 1.2:  # 更宽松的面积阈值
             anomaly_score += 2
             anomaly_reasons.append('area is too large')
-        elif comp['area'] < args.min_area:
-            anomaly_score += 1  # 轻微异常
-            anomaly_reasons.append('area is slightly small')
         
         # 2. 形状异常检测（更宽松的长宽比）
         if comp['aspect_ratio'] < args.min_aspect_ratio * 0.8:  # 更宽松
@@ -478,6 +711,11 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     # 连通域分析
     components_info = analyze_connected_components(mask_filtered)
     
+    # 识别并处理UNet误报的大区域，从中提取真正的催化剂
+    false_positive_regions = []
+    if args.enable_false_positive_filter:
+        components_info, false_positive_regions = intelligent_component_filtering(components_info, args)
+    
     # 智能连通域合并（可选）
     if args.enable_component_merge:
         components_info = merge_connected_components(
@@ -487,13 +725,14 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     # 异常分类
     classification_result = classify_anomalies(components_info, original_image.shape, args)
     
-    return classification_result, mask_filtered
+    return classification_result, mask_filtered, false_positive_regions
 
 
-def visualize_results(original_image, classification_result, anomaly_mask):
+def visualize_results(original_image, classification_result, anomaly_mask, false_positive_regions=None, show_false_positive=False):
     """
     生成可视化结果
     显示整体催化剂连通域mask叠加效果，用不同颜色标注不同类型
+    可选显示误报区域的半透明mask
     """
     vis_image = original_image.copy()
     
@@ -554,9 +793,58 @@ def visualize_results(original_image, classification_result, anomaly_mask):
             # cv2.putText(vis_image, area_text, (center_x-area_size[0]//2, center_y+area_size[1]+5), 
             #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
     
+    # 绘制误报区域（如果启用且有误报区域）
+    if show_false_positive and false_positive_regions:
+        # 创建误报区域的mask
+        fp_mask = np.zeros_like(original_image)
+        fp_color = (128, 0, 128)  # 紫色表示误报区域
+        
+        for fp_region in false_positive_regions:
+            # 计算最小外接矩形
+            min_rect = cv2.minAreaRect(fp_region['contour'])
+            rect_points = cv2.boxPoints(min_rect)
+            rect_points = np.int0(rect_points)
+            
+            # 使用最小外接矩形的半透明mask显示误报区域
+            cv2.fillPoly(fp_mask, [rect_points], fp_color)
+            
+            # 绘制误报区域的轮廓边界（保持原轮廓）
+            cv2.drawContours(vis_image, [fp_region['contour']], -1, fp_color, 3)
+            
+            # 绘制最小外接矩形边界
+            cv2.drawContours(vis_image, [rect_points], -1, fp_color, 2)
+            
+            # 在误报区域中心添加标签
+            moments = cv2.moments(fp_region['contour'])
+            if moments['m00'] != 0:
+                center_x = int(moments['m10'] / moments['m00'])
+                center_y = int(moments['m01'] / moments['m00'])
+                
+                # 添加误报标签
+                fp_text = "FALSE_POSITIVE"
+                text_size = cv2.getTextSize(fp_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+                cv2.rectangle(vis_image, (center_x-text_size[0]//2-5, center_y-text_size[1]-10), 
+                             (center_x+text_size[0]//2+5, center_y-5), (255, 255, 255), -1)
+                cv2.rectangle(vis_image, (center_x-text_size[0]//2-5, center_y-text_size[1]-10), 
+                             (center_x+text_size[0]//2+5, center_y-5), fp_color, 2)
+                cv2.putText(vis_image, fp_text, (center_x-text_size[0]//2, center_y-8), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, fp_color, 2)
+                
+                # 添加详细信息
+                detail_text = f"Area:{fp_region['area']}, Density:{fp_region['density']:.3f}"
+                detail_size = cv2.getTextSize(detail_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                cv2.rectangle(vis_image, (center_x-detail_size[0]//2-3, center_y+5), 
+                             (center_x+detail_size[0]//2+3, center_y+detail_size[1]+8), (255, 255, 255), -1)
+                cv2.putText(vis_image, detail_text, (center_x-detail_size[0]//2, center_y+detail_size[1]+5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        # 将误报mask以半透明形式叠加到图像上
+        vis_image = cv2.addWeighted(vis_image, 0.8, fp_mask, 0.2, 0)
+    
     # 将彩色mask叠加到原图上
-    cv2.imwrite('vis_image.png', vis_image)
-    mask_overlay = cv2.addWeighted(vis_image, 0.6, colored_mask, 0.4, 0)
+    # cv2.imwrite('vis_image.png', vis_image)
+    # mask_overlay = cv2.addWeighted(vis_image, 0.6, colored_mask, 0.4, 0)
+    mask_overlay = vis_image
     
     # 添加统计信息背景
     # stats_bg_height = 100
@@ -600,11 +888,12 @@ def process_single_image_yiwu(image_path, net, device, args, output_dir):
             raise ValueError(f"无法读取原图: {image_path}")
         
         # 异物异形检测
-        classification_result, anomaly_mask = detect_foreign_objects(
+        classification_result, anomaly_mask, false_positive_regions = detect_foreign_objects(
             mask_unet, original_image, mask_eroded, args)
         
         # 生成可视化结果
-        vis_image = visualize_results(original_image, classification_result, anomaly_mask)
+        vis_image = visualize_results(original_image, classification_result, anomaly_mask, 
+                                    false_positive_regions, args.show_false_positive)
         
         # 保存结果
         filename = os.path.basename(image_path)
@@ -717,6 +1006,14 @@ def main():
     if args.enable_component_merge:
         print(f"  合并距离阈值: {args.merge_distance}")
         print(f"  合并角度阈值: {args.merge_angle_threshold}度")
+    print(f"  🚀 智能误报过滤: {'启用' if args.enable_false_positive_filter else '禁用'}")
+    if args.enable_false_positive_filter:
+        mode_desc = "直接去除" if args.fp_remove_mode == 'remove' else "提取内部组件"
+        print(f"  误报处理模式: {mode_desc}")
+        print(f"  误报密度阈值: {args.fp_density_threshold}")
+        print(f"  误报面积阈值: {args.fp_area_threshold}")
+        print(f"  误报评分阈值: {args.fp_score_threshold}")
+        print(f"  误报区域可视化: {'启用' if args.show_false_positive else '禁用'}")
 
 
 if __name__ == '__main__':
