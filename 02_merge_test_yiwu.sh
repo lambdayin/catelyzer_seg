@@ -46,12 +46,12 @@ INPUT_DIR="./data/catalyst_merge/origin_data"
 OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0002_add_merge"
 
 # 异物检测参数
-MIN_COMPONENT_AREA=200 # 连通域预过滤最小面积阈值
+MIN_COMPONENT_AREA=500 # 连通域预过滤最小面积阈值
 MIN_AREA=500           # 最小连通域面积阈值=>预设，没有用到
-MAX_AREA=50000         # 最大连通域面积阈值
+MAX_AREA=20000         # 最大连通域面积阈值
 MIN_ASPECT_RATIO=1.5   # 最小长宽比阈值
 MAX_ASPECT_RATIO=20.0  # 最大长宽比阈值
-MIN_SOLIDITY=0.6       # 最小实心度阈值
+MIN_SOLIDITY=0.8       # 最小实心度阈值
 EDGE_THRESHOLD=50      # 边缘区域阈值(像素)
 
 # 智能连通域合并参数

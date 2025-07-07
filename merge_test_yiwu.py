@@ -292,6 +292,18 @@ def merge_component_group(component_group):
     for comp in component_group:
         merged_mask = cv2.bitwise_or(merged_mask, comp['mask'])
     
+    # 合并anomaly_score和reasons（使用最高分数）
+    max_anomaly_score = 0
+    combined_reasons = []
+    for comp in component_group:
+        if 'anomaly_score' in comp:
+            max_anomaly_score = max(max_anomaly_score, comp['anomaly_score'])
+        if 'anomaly_reasons' in comp:
+            combined_reasons.extend(comp['anomaly_reasons'])
+    
+    # 去重reasons
+    unique_reasons = list(set(combined_reasons))
+    
     return {
         'label': component_group[0]['label'],  # 使用第一个组件的标签
         'area': area,
@@ -302,7 +314,9 @@ def merge_component_group(component_group):
         'bbox': (x, y, w, h),
         'min_rect': min_rect,
         'contour': hull,
-        'mask': merged_mask
+        'mask': merged_mask,
+        'anomaly_score': max_anomaly_score,  # 使用最高的异常分数
+        'anomaly_reasons': unique_reasons    # 合并所有异常原因
     }
 
 
@@ -369,7 +383,9 @@ def analyze_connected_components(mask):
             'bbox': (x, y, w, h),
             'min_rect': min_rect,
             'contour': contour,
-            'mask': component_mask
+            'mask': component_mask,
+            'anomaly_score': 0,  # 初始化异常分数
+            'anomaly_reasons': []  # 初始化异常原因列表
         }
         
         components_info.append(component_info)
@@ -516,7 +532,9 @@ def extract_internal_components(false_positive_mask, args):
                                 'bbox': (x, y, w, h),
                                 'min_rect': min_rect,
                                 'contour': contour,
-                                'mask': component_mask
+                                'mask': component_mask,
+                                'anomaly_score': 0,  # 提取的组件初始化为0分
+                                'anomaly_reasons': []  # 初始化为空原因列表
                             }
                             
                             extracted_components.append(component_info)
@@ -605,6 +623,40 @@ def classify_anomalies(components_info, image_shape, args):
     # 计算图像边缘区域
     edge_threshold = args.edge_threshold
     
+    # 🚀 针对当前图片：统计当前图片内所有连通域的最小外接矩形短边分布
+    short_sides = []
+    for comp in components_info:
+        min_rect = comp['min_rect']
+        width_rect, height_rect = min_rect[1]
+        short_side = min(width_rect, height_rect)
+        short_sides.append(short_side)
+    
+    # 计算当前图片的短边分布统计
+    if len(short_sides) >= 3:  # 至少需要3个样本才能计算统计量
+        short_sides_array = np.array(short_sides)
+        median_short_side = np.median(short_sides_array)
+        q75 = np.percentile(short_sides_array, 75)
+        q25 = np.percentile(short_sides_array, 25)
+        iqr = q75 - q25
+        
+        # 使用IQR方法定义离群值阈值（针对当前图片）
+        if iqr > 0:  # 确保IQR大于0
+            outlier_threshold_high = q75 + 1.5 * iqr  # 上界：过粗
+            outlier_threshold_low = max(q25 - 1.5 * iqr, median_short_side * 0.3)  # 下界：过细，但不能太小
+        else:
+            # IQR为0，所有值相近，使用更宽松的阈值
+            outlier_threshold_high = median_short_side * 2.0
+            outlier_threshold_low = median_short_side * 0.5
+        
+        print(f"当前图片短边分布统计: 连通域数={len(short_sides)}, 中位数={median_short_side:.1f}, Q25={q25:.1f}, Q75={q75:.1f}, IQR={iqr:.1f}")
+        print(f"当前图片离群值阈值: 过细<{outlier_threshold_low:.1f}, 过粗>{outlier_threshold_high:.1f}")
+    else:
+        # 样本不足，使用保守阈值（基于当前图片的平均值）
+        median_short_side = np.mean(short_sides) if short_sides else 10
+        outlier_threshold_high = median_short_side * 2.5
+        outlier_threshold_low = median_short_side * 0.4
+        print(f"当前图片连通域数量较少({len(short_sides)})，使用保守阈值: 过细<{outlier_threshold_low:.1f}, 过粗>{outlier_threshold_high:.1f}")
+    
     for comp in components_info:
         anomaly_score = 0
         anomaly_reasons = []
@@ -624,10 +676,10 @@ def classify_anomalies(components_info, image_shape, args):
             anomaly_reasons.append('area is too large')
         
         # 2. 形状异常检测（更宽松的长宽比）
-        if comp['aspect_ratio'] < args.min_aspect_ratio * 0.8:  # 更宽松
+        if comp['aspect_ratio'] < args.min_aspect_ratio * 0.8:
             anomaly_score += 2
             anomaly_reasons.append('aspect ratio is too small')
-        elif comp['aspect_ratio'] > args.max_aspect_ratio * 1.2:  # 更宽松
+        elif comp['aspect_ratio'] > args.max_aspect_ratio * 1.2:
             anomaly_score += 2
             anomaly_reasons.append('aspect ratio is too large')
         elif comp['aspect_ratio'] < args.min_aspect_ratio:
@@ -650,28 +702,56 @@ def classify_anomalies(components_info, image_shape, args):
             anomaly_score += 1  # 轻微异常
             anomaly_reasons.append('shape is slightly circular')
         
-        # 5. 综合评分判断
+        # 🚀 5. 新增：短边离群检测（基于当前图片分布检测过粗或过细的催化剂）
+        min_rect = comp['min_rect']
+        width_rect, height_rect = min_rect[1]
+        component_short_side = min(width_rect, height_rect)
+        
+        if component_short_side > 2 * outlier_threshold_high:
+            # 短边过长（催化剂过粗），相对于当前图片内其他催化剂明显过粗
+            anomaly_score += 3  # 高分数
+            anomaly_reasons.append('short side is too thick (outlier)')
+            print(f"检测到过粗组件: 短边={component_short_side:.1f} > 当前图片阈值{outlier_threshold_high:.1f}")
+        elif component_short_side < outlier_threshold_low:
+            # 短边过短（催化剂过细），相对于当前图片内其他催化剂明显过细
+            anomaly_score += 2  # 中等分数
+            anomaly_reasons.append('short side is too thin (outlier)')
+            print(f"检测到过细组件: 短边={component_short_side:.1f} < 当前图片阈值{outlier_threshold_low:.1f}")
+        
+        # 6. 综合评分判断
         comp['anomaly_score'] = anomaly_score
         comp['anomaly_reasons'] = anomaly_reasons
         
-        # 使用评分制度进行分类
+        # 使用评分制度进行分类（考虑新增的短边离群检测）
         if anomaly_score <= 1:  # 正常或轻微异常
             normal_components.append(comp)
-        elif anomaly_score >= 3:  # 明显异常
-            # 区分异物和异形催化剂
-            if (comp['area'] < args.min_area * 1.5 or  # 面积较小
-                comp['circularity'] > 0.7 or          # 较圆
-                'shape is too circular' in anomaly_reasons):
-                foreign_objects.append(comp)
-            else:
-                deformed_catalysts.append(comp)
-        else:  # 中等异常 (score = 2)
+        elif anomaly_score == 2:  # 中等异常
             # 更保守的分类，倾向于归类为正常
             if (comp['circularity'] > 0.8 or  # 只有非常圆的才认为是异物
-                comp['area'] < args.min_area * 0.5):  # 或者面积极小
+                comp['area'] < args.min_area * 0.5 or  # 或者面积极小
+                'short side is too thick (outlier)' in anomaly_reasons):  # 或者明显过粗
                 foreign_objects.append(comp)
             else:
                 normal_components.append(comp)  # 归类为正常
+        elif anomaly_score >= 3 and anomaly_score <= 6:  # 明显异常
+            # 区分异物和异形催化剂
+            if (comp['area'] < args.min_area * 1.5):
+                normal_components.append(comp)
+            elif (comp['circularity'] > 0.7 or          # 较圆
+                'shape is too circular' in anomaly_reasons or
+                'short side is too thick (outlier)' in anomaly_reasons):  # 过粗通常是异物
+                foreign_objects.append(comp)
+            else:
+                deformed_catalysts.append(comp)
+        else:  # 高异常 (score > 6)
+            # 高分数异常，更严格分类
+            if (comp['area'] < args.min_area * 1.5 or  # 面积较小
+                comp['circularity'] > 0.7 or          # 较圆
+                'shape is too circular' in anomaly_reasons or
+                'short side is too thick (outlier)' in anomaly_reasons):  # 过粗
+                foreign_objects.append(comp)
+            else:
+                deformed_catalysts.append(comp)
     
     return {
         'normal': normal_components,
@@ -771,27 +851,33 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
             rect_points = np.intp(rect_points)
             cv2.drawContours(vis_image, [rect_points], -1, color, 2)
             
-            # 添加中文标签
+            # 添加异常分数标签
             center_x, center_y = comp['center']
             
-            # 添加文字背景
-            # text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-            # cv2.rectangle(vis_image, (center_x-text_size[0]//2-5, center_y-text_size[1]-10), 
-            #              (center_x+text_size[0]//2+5, center_y-5), (255, 255, 255), -1)
-            # cv2.rectangle(vis_image, (center_x-text_size[0]//2-5, center_y-text_size[1]-10), 
-            #              (center_x+text_size[0]//2+5, center_y-5), color, 2)
-            
-            # # 添加标签文字
-            # cv2.putText(vis_image, label_text, (center_x-text_size[0]//2, center_y-8), 
-            #            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-            
-            # 添加面积信息
-            # area_text = f"area:{comp['area']}"
-            # area_size = cv2.getTextSize(area_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
-            # cv2.rectangle(vis_image, (center_x-area_size[0]//2-3, center_y+5), 
-            #              (center_x+area_size[0]//2+3, center_y+area_size[1]+8), (255, 255, 255), -1)
-            # cv2.putText(vis_image, area_text, (center_x-area_size[0]//2, center_y+area_size[1]+5), 
-            #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+            # 只为异常组件（异物和异形催化剂）添加anomaly_score标签
+            if category in ['foreign_objects', 'deformed_catalysts']:
+                anomaly_score = comp.get('anomaly_score', 0)
+                score_text = f"Score:{anomaly_score}"
+                
+                # 计算文字尺寸
+                font_scale = 0.7
+                font_thickness = 2
+                score_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                
+                # 添加白色背景
+                bg_x1 = center_x - score_size[0]//2 - 5
+                bg_y1 = center_y - score_size[1] - 10
+                bg_x2 = center_x + score_size[0]//2 + 5
+                bg_y2 = center_y - 5
+                
+                cv2.rectangle(vis_image, (bg_x1, bg_y1), (bg_x2, bg_y2), (255, 255, 255), -1)
+                cv2.rectangle(vis_image, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 2)
+                
+                # 添加分数文字
+                text_x = center_x - score_size[0]//2
+                text_y = center_y - 8
+                cv2.putText(vis_image, score_text, (text_x, text_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
     
     # 绘制误报区域（如果启用且有误报区域）
     if show_false_positive and false_positive_regions:
