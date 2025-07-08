@@ -69,8 +69,8 @@ SHOW_FALSE_POSITIVE=false   # 显示误报区域: true=在结果图中显示误�
 
 # 🌟 弯曲度分析参数
 ENABLE_CURVATURE_ANALYSIS=true  # 启用弯曲度分析：区分弯曲催化剂和直条状催化剂
-CURVATURE_SCORE_THRESHOLD=35    # 弯曲度判断评分阈值（越小越严格，推荐范围：25-50）
-SHOW_CURVATURE_DETAILS=true     # 显示弯曲度详细信息
+CURVATURE_SCORE_THRESHOLD=50    # 弯曲度判断评分阈值（越小越严格，推荐范围：25-50）
+SHOW_CURVATURE_DETAILS=false     # 显示弯曲度详细信息
 
 # 支持的图像格式
 IMAGE_EXTENSIONS="jpg jpeg png bmp tiff"
