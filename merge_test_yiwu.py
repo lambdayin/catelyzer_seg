@@ -44,10 +44,17 @@ def parse_args():
                        help="误报判断面积阈值（绝对值，适用于误报大区域）")
     parser.add_argument('--fp-score-threshold', default=3, type=int, 
                        help="误报判断综合评分阈值（越小越严格）")
-    parser.add_argument('--fp-remove-mode', choices=['extract', 'remove'], default='remove',
-                       help="误报处理模式：extract=提取内部组件，remove=直接去除（推荐）")
+
     parser.add_argument('--show-false-positive', action='store_true', default=False,
                        help="显示误报区域：启用时在结果图中以半透明mask显示检测到的误报区域")
+    
+    # 🌟 弯曲度分析参数
+    parser.add_argument('--enable-curvature-analysis', action='store_true', default=True,
+                       help="启用弯曲度分析：区分弯曲催化剂和直条状催化剂（默认启用）")
+    parser.add_argument('--curvature-score-threshold', default=35, type=int,
+                       help="弯曲度判断评分阈值（越小越严格，推荐范围：25-50）")
+    parser.add_argument('--show-curvature-details', action='store_true', default=True,
+                       help="显示弯曲度详细信息：在结果图中显示弯曲度评分和特征值（默认启用）")
     
     return parser.parse_args()
 
@@ -132,6 +139,340 @@ def filter_small_components(mask, min_area):
             filtered_mask[component_mask > 0] = 255
     
     return filtered_mask
+
+
+def calculate_curvature_features(contour, component_mask):
+    """
+    🌟 创新算法：多维度弯曲度分析
+    
+    通过5个创新特征精准区分弯曲催化剂和直条状催化剂：
+    1. 骨架线弯曲度 - 基于形态学骨架的弯曲程度
+    2. 轮廓曲率方差 - 轮廓各点曲率变化的剧烈程度  
+    3. 直线拟合误差 - 用直线拟合轮廓的偏差大小
+    4. 总弯曲角度 - 从起点到终点的累积转角
+    5. 直线度比例 - 端点直线距离与轮廓长度比值
+    """
+    
+    # 确保轮廓有足够的点
+    if len(contour) < 10:
+        return {
+            'skeleton_curvature': 0,
+            'contour_curvature_var': 0, 
+            'line_fitting_error': 0,
+            'bend_angle': 0,
+            'straightness_ratio': 1.0
+        }
+    
+    # 简化轮廓，减少噪声影响
+    epsilon = 0.005 * cv2.arcLength(contour, True)
+    simplified_contour = cv2.approxPolyDP(contour, epsilon, True)
+    
+    if len(simplified_contour) < 5:
+        simplified_contour = contour
+    
+    # 1. 🔥 骨架线弯曲度分析（最创新特征）
+    skeleton_curvature = calculate_skeleton_curvature(component_mask)
+    
+    # 2. 🔥 轮廓曲率方差分析
+    contour_curvature_var = calculate_contour_curvature_variance(simplified_contour)
+    
+    # 3. 🔥 直线拟合误差分析  
+    line_fitting_error = calculate_line_fitting_error(simplified_contour)
+    
+    # 4. 🔥 总弯曲角度分析
+    bend_angle = calculate_total_bend_angle(simplified_contour)
+    
+    # 5. 🔥 直线度比例分析
+    straightness_ratio = calculate_straightness_ratio(simplified_contour)
+    
+    return {
+        'skeleton_curvature': skeleton_curvature,
+        'contour_curvature_var': contour_curvature_var,
+        'line_fitting_error': line_fitting_error, 
+        'bend_angle': bend_angle,
+        'straightness_ratio': straightness_ratio
+    }
+
+
+def calculate_skeleton_curvature(component_mask):
+    """
+    🔥 核心创新：骨架线弯曲度分析
+    提取催化剂的中轴骨架线，分析其弯曲程度
+    """
+    try:
+        # 形态学骨架提取
+        skeleton = cv2.ximgproc.thinning(component_mask)
+        
+        # 找到骨架线的关键点
+        skeleton_points = np.column_stack(np.where(skeleton > 0))
+        
+        if len(skeleton_points) < 10:
+            return 0
+        
+        # 按空间顺序排列骨架点（简化版路径追踪）
+        ordered_points = order_skeleton_points(skeleton_points)
+        
+        if len(ordered_points) < 5:
+            return 0
+        
+        # 计算骨架线的曲率
+        total_curvature = 0
+        for i in range(1, len(ordered_points) - 1):
+            p1 = ordered_points[i-1]
+            p2 = ordered_points[i] 
+            p3 = ordered_points[i+1]
+            
+            # 计算三点间的曲率（使用三角形面积法）
+            curvature = calculate_point_curvature(p1, p2, p3)
+            total_curvature += curvature
+        
+        # 归一化：除以骨架长度
+        skeleton_length = len(ordered_points)
+        return total_curvature / skeleton_length if skeleton_length > 0 else 0
+        
+    except:
+        # 如果没有ximgproc，使用简化的骨架算法
+        return calculate_simplified_skeleton_curvature(component_mask)
+
+
+def calculate_simplified_skeleton_curvature(component_mask):
+    """
+    简化版骨架弯曲度（不依赖ximgproc）
+    使用距离变换+峰值检测近似骨架线
+    """
+    try:
+        # 距离变换
+        dist_transform = cv2.distanceTransform(component_mask, cv2.DIST_L2, 5)
+        
+        # 找到距离变换的峰值点作为中轴线近似
+        _, _, _, max_loc = cv2.minMaxLoc(dist_transform)
+        
+        # 沿着距离变换的高值区域提取中轴线
+        height, width = dist_transform.shape
+        threshold = np.max(dist_transform) * 0.7
+        
+        # 提取高值点
+        high_value_points = np.column_stack(np.where(dist_transform >= threshold))
+        
+        if len(high_value_points) < 5:
+            return 0
+        
+        # 计算这些点的弯曲程度
+        # 使用主成分分析找到主方向
+        if len(high_value_points) >= 3:
+            # 计算点集的协方差矩阵
+            centered_points = high_value_points - np.mean(high_value_points, axis=0)
+            cov_matrix = np.cov(centered_points.T)
+            
+            # 计算特征值比例（长轴vs短轴）
+            eigenvalues = np.linalg.eigvals(cov_matrix)
+            eigenvalues = np.sort(eigenvalues)[::-1]  # 降序排列
+            
+            if eigenvalues[0] > 0:
+                axis_ratio = eigenvalues[1] / eigenvalues[0]
+                # 轴比越大，越接近圆形（弯曲），轴比越小，越接近直线
+                return axis_ratio * 100  # 放大便于观察
+            
+        return 0
+        
+    except:
+        return 0
+
+
+def order_skeleton_points(skeleton_points):
+    """
+    对骨架点进行空间排序，构建连续路径
+    简化版：按主方向排序
+    """
+    if len(skeleton_points) < 3:
+        return skeleton_points
+    
+    # 找到最远的两个点作为端点
+    max_dist = 0
+    start_idx, end_idx = 0, 0
+    
+    for i in range(len(skeleton_points)):
+        for j in range(i+1, len(skeleton_points)):
+            dist = np.linalg.norm(skeleton_points[i] - skeleton_points[j])
+            if dist > max_dist:
+                max_dist = dist
+                start_idx, end_idx = i, j
+    
+    start_point = skeleton_points[start_idx]
+    end_point = skeleton_points[end_idx]
+    
+    # 沿着从start到end的方向排序点
+    direction = end_point - start_point
+    direction_norm = np.linalg.norm(direction)
+    
+    if direction_norm == 0:
+        return skeleton_points
+    
+    direction = direction / direction_norm
+    
+    # 计算每个点在主方向上的投影
+    projections = []
+    for point in skeleton_points:
+        proj = np.dot(point - start_point, direction)
+        projections.append(proj)
+    
+    # 按投影值排序
+    sorted_indices = np.argsort(projections)
+    return skeleton_points[sorted_indices]
+
+
+def calculate_point_curvature(p1, p2, p3):
+    """
+    计算三个点构成的曲率
+    使用三角形面积法计算曲率
+    """
+    # 向量
+    v1 = p2 - p1
+    v2 = p3 - p2
+    
+    # 边长
+    d1 = np.linalg.norm(v1)
+    d2 = np.linalg.norm(v2)
+    
+    if d1 == 0 or d2 == 0:
+        return 0
+    
+    # 叉积计算三角形面积
+    cross_product = np.cross(v1, v2)
+    area = abs(cross_product) / 2.0
+    
+    # 曲率 = 4 * 面积 / (边长乘积)
+    curvature = 4 * area / (d1 * d2 * np.linalg.norm(p3 - p1))
+    
+    return curvature
+
+
+def calculate_contour_curvature_variance(contour):
+    """
+    🔥 轮廓曲率方差分析
+    分析轮廓上各点曲率的变化剧烈程度
+    """
+    if len(contour) < 5:
+        return 0
+    
+    # 简化轮廓为点序列
+    points = contour.reshape(-1, 2)
+    
+    curvatures = []
+    n = len(points)
+    
+    # 计算每个点的曲率
+    for i in range(n):
+        p1 = points[(i-2) % n]
+        p2 = points[i]
+        p3 = points[(i+2) % n]
+        
+        curvature = calculate_point_curvature(p1, p2, p3)
+        curvatures.append(curvature)
+    
+    # 计算曲率方差
+    if len(curvatures) > 1:
+        return np.var(curvatures) * 1000  # 放大便于观察
+    return 0
+
+
+def calculate_line_fitting_error(contour):
+    """
+    🔥 直线拟合误差分析
+    用直线拟合轮廓，计算拟合误差
+    """
+    if len(contour) < 4:
+        return 0
+    
+    # 简化为点序列
+    points = contour.reshape(-1, 2).astype(np.float32)
+    
+    # 使用OpenCV的fitLine拟合直线
+    line = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
+    
+    # 直线参数：vx, vy, x0, y0
+    vx, vy, x0, y0 = line.flatten()
+    
+    # 计算每个点到直线的距离
+    total_error = 0
+    for point in points:
+        px, py = point
+        
+        # 点到直线距离公式
+        # 直线方程：(x-x0)/vx = (y-y0)/vy
+        # 转换为 ax + by + c = 0 形式：vy*x - vx*y + (vx*y0 - vy*x0) = 0
+        a, b, c = vy, -vx, vx*y0 - vy*x0
+        
+        # 点到直线距离
+        distance = abs(a*px + b*py + c) / np.sqrt(a*a + b*b)
+        total_error += distance
+    
+    # 归一化误差
+    avg_error = total_error / len(points)
+    return avg_error
+
+
+def calculate_total_bend_angle(contour):
+    """
+    🔥 总弯曲角度分析
+    计算轮廓从起点到终点的累积转角
+    """
+    if len(contour) < 6:
+        return 0
+    
+    points = contour.reshape(-1, 2)
+    
+    total_angle = 0
+    
+    # 计算相邻线段间的夹角
+    for i in range(1, len(points) - 1):
+        p1 = points[i-1]
+        p2 = points[i]
+        p3 = points[i+1]
+        
+        # 向量
+        v1 = p1 - p2
+        v2 = p3 - p2
+        
+        # 计算夹角
+        dot_product = np.dot(v1, v2)
+        norms = np.linalg.norm(v1) * np.linalg.norm(v2)
+        
+        if norms > 0:
+            cos_angle = np.clip(dot_product / norms, -1, 1)
+            angle = np.arccos(cos_angle)
+            
+            # 累积偏离180度的角度
+            deviation = abs(angle - np.pi)
+            total_angle += deviation
+    
+    # 转换为度数
+    return np.degrees(total_angle)
+
+
+def calculate_straightness_ratio(contour):
+    """
+    🔥 直线度比例分析
+    端点距离与轮廓长度的比值
+    """
+    if len(contour) < 3:
+        return 1.0
+    
+    points = contour.reshape(-1, 2)
+    
+    # 端点距离
+    start_point = points[0]
+    end_point = points[-1]
+    straight_distance = np.linalg.norm(end_point - start_point)
+    
+    # 轮廓长度
+    contour_length = cv2.arcLength(contour, False)
+    
+    if contour_length > 0:
+        ratio = straight_distance / contour_length
+        return ratio
+    
+    return 1.0
 
 
 def calculate_component_orientation(contour):
@@ -304,6 +645,24 @@ def merge_component_group(component_group):
     # 去重reasons
     unique_reasons = list(set(combined_reasons))
     
+    # 🚀 计算合并后的密度特征
+    # 1. 最小外接矩形密度
+    min_rect_area = width * height
+    bbox_density = area / min_rect_area if min_rect_area > 0 else 0
+    
+    # 2. 轮廓复杂度分析
+    hull_indices = cv2.convexHull(hull, returnPoints=False)
+    complexity_score = 0
+    if len(hull_indices) > 3 and len(hull) > 3:
+        try:
+            defects = cv2.convexityDefects(hull, hull_indices)
+            complexity_score = len(defects) if defects is not None else 0
+        except:
+            complexity_score = 0
+    
+    # 🌟 计算合并后的弯曲度特征
+    curvature_features = calculate_curvature_features(hull, merged_mask)
+    
     return {
         'label': component_group[0]['label'],  # 使用第一个组件的标签
         'area': area,
@@ -316,14 +675,25 @@ def merge_component_group(component_group):
         'contour': hull,
         'mask': merged_mask,
         'anomaly_score': max_anomaly_score,  # 使用最高的异常分数
-        'anomaly_reasons': unique_reasons    # 合并所有异常原因
+        'anomaly_reasons': unique_reasons,    # 合并所有异常原因
+        # 🚀 新增密度特征
+        'bbox_density': bbox_density,
+        'complexity_score': complexity_score,
+        # 🌟 新增弯曲度特征
+        'skeleton_curvature': curvature_features['skeleton_curvature'],
+        'contour_curvature_var': curvature_features['contour_curvature_var'],
+        'line_fitting_error': curvature_features['line_fitting_error'],
+        'bend_angle': curvature_features['bend_angle'],
+        'straightness_ratio': curvature_features['straightness_ratio'],
+        'is_curved': False,  # 是否为弯曲催化剂（待分类）
+        'curvature_score': 0  # 弯曲度综合评分
     }
 
 
-def analyze_connected_components(mask):
+def analyze_connected_components(mask, args=None):
     """
     连通域分析和特征提取
-    返回每个连通域的详细特征信息
+    返回每个连通域的详细特征信息（包含密度特征和弯曲度分类）
     """
     # 连通域标记
     num_labels, labeled_mask = cv2.connectedComponents(mask)
@@ -365,6 +735,24 @@ def analyze_connected_components(mask):
         perimeter = cv2.arcLength(contour, True)
         circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
         
+        # 🚀 密度特征（合并自calculate_region_density）
+        # 1. 最小外接矩形密度（更准确的密度计算）
+        min_rect_area = width * height
+        bbox_density = area / min_rect_area if min_rect_area > 0 else 0
+        
+        # 2. 轮廓复杂度分析（凸包缺陷数量）
+        hull_indices = cv2.convexHull(contour, returnPoints=False)
+        complexity_score = 0
+        if len(hull_indices) > 3 and len(contour) > 3:
+            try:
+                defects = cv2.convexityDefects(contour, hull_indices)
+                complexity_score = len(defects) if defects is not None else 0
+            except:
+                complexity_score = 0
+        
+        # 🌟 弯曲度分析特征（创新算法）
+        curvature_features = calculate_curvature_features(contour, component_mask)
+        
         # 中心点
         moments = cv2.moments(contour)
         if moments['m00'] != 0:
@@ -385,7 +773,18 @@ def analyze_connected_components(mask):
             'contour': contour,
             'mask': component_mask,
             'anomaly_score': 0,  # 初始化异常分数
-            'anomaly_reasons': []  # 初始化异常原因列表
+            'anomaly_reasons': [],  # 初始化异常原因列表
+            # 🚀 新增密度特征
+            'bbox_density': bbox_density,  # 最小外接矩形密度
+            'complexity_score': complexity_score,  # 轮廓复杂度评分
+            # 🌟 新增弯曲度特征
+            'skeleton_curvature': curvature_features['skeleton_curvature'],  # 骨架线弯曲度
+            'contour_curvature_var': curvature_features['contour_curvature_var'],  # 轮廓曲率方差
+            'line_fitting_error': curvature_features['line_fitting_error'],  # 直线拟合误差
+            'bend_angle': curvature_features['bend_angle'],  # 总弯曲角度
+            'straightness_ratio': curvature_features['straightness_ratio'],  # 直线度比例
+            'is_curved': False,  # 是否为弯曲催化剂（待分类）
+            'curvature_score': 0  # 弯曲度综合评分
         }
         
         components_info.append(component_info)
@@ -393,48 +792,7 @@ def analyze_connected_components(mask):
     return components_info
 
 
-def calculate_region_density(component_mask):
-    """
-    计算连通域的密度特征
-    """
-    # 1. 最小外接矩形密度（更准确的密度计算）
-    # actual_area = np.sum(component_mask > 0)
-    contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if len(contours) > 0:
-        contour = contours[0]
-        actual_area = cv2.contourArea(contour)
-        # 使用最小外接矩形而不是正外接矩形，对倾斜物体更准确
-        min_rect = cv2.minAreaRect(contour)
-        min_rect_area = min_rect[1][0] * min_rect[1][1]  # width * height
-        bbox_density = actual_area / min_rect_area if min_rect_area > 0 else 0
-    else:
-        bbox_density = 0
-    
-    # 2. 轮廓复杂度分析
-    # 通过凸包缺陷(convexity defects)来评估轮廓的复杂程度
-    if len(contours) > 0:
-        contour = contours[0]
-        # 计算轮廓的convex defects
-        hull = cv2.convexHull(contour, returnPoints=False)
-        if len(hull) > 3 and len(contour) > 3:
-            try:
-                defects = cv2.convexityDefects(contour, hull)
-                complexity_score = len(defects) if defects is not None else 0
-            except:
-                complexity_score = 0
-        else:
-            complexity_score = 0
-    else:
-        complexity_score = 0
-    
-    return {
-        'bbox_density': bbox_density,
-        'complexity_score': complexity_score
-    }
-
-
-def is_false_positive_region(component_info, density_info, args):
+def is_false_positive_region(component_info, args):
     """
     判断连通域是否为UNet误报的大区域
     
@@ -445,8 +803,8 @@ def is_false_positive_region(component_info, density_info, args):
     4. 保留轮廓复杂度检测，识别真正不规则的误报区域
     """
     area = component_info['area']
-    bbox_density = density_info['bbox_density']
-    complexity_score = density_info['complexity_score']
+    bbox_density = component_info['bbox_density']
+    complexity_score = component_info['complexity_score']
     
     # 使用专门针对误报的判断阈值
     is_oversized = area > args.fp_area_threshold  # 使用专门的误报面积阈值
@@ -465,149 +823,171 @@ def is_false_positive_region(component_info, density_info, args):
     return false_positive_score >= args.fp_score_threshold  # 使用参数化阈值
 
 
-def extract_internal_components(false_positive_mask, args):
-    """
-    从误报的大区域中提取内部真正的催化剂组件
-    
-    核心算法：多尺度形态学分离
-    """
-    # 1. 使用开运算分离粘连的组件
-    # 逐步增大核的尺寸，直到能够有效分离
-    extracted_components = []
-    
-    for kernel_size in [3, 5, 7, 9]:
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        
-        # 开运算：先腐蚀后膨胀，分离粘连区域
-        opened_mask = cv2.morphologyEx(false_positive_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        
-        # 找到分离后的连通域
-        num_labels, labeled_mask = cv2.connectedComponents(opened_mask)
-        
-        for label in range(1, num_labels):
-            component_mask = (labeled_mask == label).astype(np.uint8)
-            area = cv2.countNonZero(component_mask)
-            
-            # 检查是否为合理尺寸的催化剂
-            if args.min_area * 0.5 <= area <= args.max_area:
-                # 计算基本特征
-                contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if len(contours) > 0:
-                    contour = contours[0]
-                    
-                    # 基本几何特征计算
-                    min_rect = cv2.minAreaRect(contour)
-                    width, height = min_rect[1]
-                    if width > 0 and height > 0:
-                        aspect_ratio = max(width, height) / min(width, height)
-                        
-                        # 检查长宽比是否合理
-                        if aspect_ratio <= args.max_aspect_ratio * 1.5:  # 稍微放宽标准
-                            x, y, w, h = cv2.boundingRect(contour)
-                            
-                            # 计算实心度
-                            hull = cv2.convexHull(contour)
-                            hull_area = cv2.contourArea(hull)
-                            solidity = area / hull_area if hull_area > 0 else 0
-                            
-                            # 计算圆形度
-                            perimeter = cv2.arcLength(contour, True)
-                            circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-                            
-                            # 中心点
-                            moments = cv2.moments(contour)
-                            if moments['m00'] != 0:
-                                center_x = int(moments['m10'] / moments['m00'])
-                                center_y = int(moments['m01'] / moments['m00'])
-                            else:
-                                center_x, center_y = x + w//2, y + h//2
-                            
-                            component_info = {
-                                'label': f'extracted_{label}_{kernel_size}',
-                                'area': area,
-                                'aspect_ratio': aspect_ratio,
-                                'solidity': solidity,
-                                'circularity': circularity,
-                                'center': (center_x, center_y),
-                                'bbox': (x, y, w, h),
-                                'min_rect': min_rect,
-                                'contour': contour,
-                                'mask': component_mask,
-                                'anomaly_score': 0,  # 提取的组件初始化为0分
-                                'anomaly_reasons': []  # 初始化为空原因列表
-                            }
-                            
-                            extracted_components.append(component_info)
-        
-        # 如果当前尺寸已经能够有效分离，就不需要继续尝试更大的核
-        if len(extracted_components) > 0:
-            break
-    
-    return extracted_components
-
 
 def intelligent_component_filtering(components_info, args):
     """
-    智能连通域过滤：识别并处理UNet误报的大区域
+    智能连通域过滤：识别并直接去除UNet误报的大区域
     
-    这是核心创新算法，能够：
+    核心算法功能：
     1. 识别UNet误报的大区域
-    2. 根据模式选择：直接去除 或 提取内部组件
+    2. 直接去除误报区域（固定remove模式）
     3. 保留正常尺寸的连通域
     4. 返回误报区域信息（用于可视化）
     """
     filtered_components = []
-    extracted_components = []
-    false_positive_regions = []  # 新增：保存误报区域信息
+    false_positive_regions = []
     removed_count = 0
     
-    mode_desc = "直接去除" if args.fp_remove_mode == 'remove' else "提取内部组件"
     print(f"\n开始智能连通域过滤，初始连通域数量: {len(components_info)}")
-    print(f"误报处理模式: {mode_desc}")
+    print(f"误报处理模式: 直接去除")
     print(f"误报区域可视化: {'启用' if args.show_false_positive else '禁用'}")
     
     for comp in components_info:
-        # 计算密度特征
-        density_info = calculate_region_density(comp['mask'])
-        
         # 判断是否为误报大区域
-        if is_false_positive_region(comp, density_info, args):
-            print(f"🚫 检测到误报大区域: 面积={comp['area']}, 最小外接矩形密度={density_info['bbox_density']:.3f}, 轮廓复杂度={density_info['complexity_score']}")
+        if is_false_positive_region(comp, args):
+            print(f"🚫 检测到误报大区域: 面积={comp['area']}, 最小外接矩形密度={comp['bbox_density']:.3f}, 轮廓复杂度={comp['complexity_score']}")
             
             # 保存误报区域信息（用于可视化）
             false_positive_regions.append({
                 'mask': comp['mask'],
                 'contour': comp['contour'],
                 'area': comp['area'],
-                'density': density_info['bbox_density'],
-                'complexity': density_info['complexity_score']
+                'density': comp['bbox_density'],
+                'complexity': comp['complexity_score']
             })
             
-            if args.fp_remove_mode == 'remove':
-                # 直接去除误报区域
-                removed_count += 1
-                print(f"  ❌ 直接去除该误报区域")
-            else:
-                # 从误报区域中提取真实组件
-                internal_components = extract_internal_components(comp['mask'], args)
-                extracted_components.extend(internal_components)
-                print(f"  ✅ 从误报区域提取到 {len(internal_components)} 个内部组件")
+            # 直接去除误报区域
+            removed_count += 1
+            print(f"  ❌ 直接去除该误报区域")
             
         else:
             # 保留正常连通域
             filtered_components.append(comp)
     
-    # 合并过滤后的连通域和提取的组件
-    final_components = filtered_components + extracted_components
+    print(f"智能过滤完成: 保留正常组件 {len(filtered_components)} 个，去除误报区域 {removed_count} 个")
+    print(f"最终连通域数量: {len(filtered_components)}")
     
-    if args.fp_remove_mode == 'remove':
-        print(f"智能过滤完成: 保留正常组件 {len(filtered_components)} 个，去除误报区域 {removed_count} 个")
-    else:
-        print(f"智能过滤完成: 保留正常组件 {len(filtered_components)} 个，提取内部组件 {len(extracted_components)} 个")
+    return filtered_components, false_positive_regions
+
+
+def apply_curvature_classification(components_info, args):
+    """
+    🌟 对所有连通域应用弯曲度分类
+    计算动态阈值，更新每个组件的弯曲度分类和评分
+    """
+    if not components_info or not args.enable_curvature_analysis:
+        return
     
-    print(f"最终连通域数量: {len(final_components)}")
+    # 🔥 动态阈值计算：基于当前图片中所有催化剂的分布
+    all_skeleton_curvatures = [comp.get('skeleton_curvature', 0) for comp in components_info]
+    all_contour_vars = [comp.get('contour_curvature_var', 0) for comp in components_info]
+    all_fitting_errors = [comp.get('line_fitting_error', 0) for comp in components_info]
+    all_bend_angles = [comp.get('bend_angle', 0) for comp in components_info]
+    all_straightness_ratios = [comp.get('straightness_ratio', 1.0) for comp in components_info]
     
-    return final_components, false_positive_regions
+    # 计算动态阈值（使用75分位数作为弯曲阈值）
+    skeleton_threshold = np.percentile(all_skeleton_curvatures, 75) if all_skeleton_curvatures else 0
+    contour_var_threshold = np.percentile(all_contour_vars, 75) if all_contour_vars else 0
+    fitting_error_threshold = np.percentile(all_fitting_errors, 75) if all_fitting_errors else 0
+    bend_angle_threshold = np.percentile(all_bend_angles, 75) if all_bend_angles else 0
+    straightness_threshold = np.percentile(all_straightness_ratios, 25) if all_straightness_ratios else 0.8
+    
+    if args.show_curvature_details:
+        print(f"🌟 弯曲度分类阈值 (动态计算):")
+        print(f"  骨架线弯曲度阈值: {skeleton_threshold:.3f}")
+        print(f"  轮廓曲率方差阈值: {contour_var_threshold:.3f}")
+        print(f"  直线拟合误差阈值: {fitting_error_threshold:.3f}")
+        print(f"  总弯曲角度阈值: {bend_angle_threshold:.1f}°")
+        print(f"  直线度比例阈值: {straightness_threshold:.3f}")
+        print(f"  综合评分阈值: {args.curvature_score_threshold}")
+    
+    curved_count = 0
+    straight_count = 0
+    
+    for comp in components_info:
+        # 获取弯曲度特征
+        skeleton_curvature = comp.get('skeleton_curvature', 0)
+        contour_curvature_var = comp.get('contour_curvature_var', 0)
+        line_fitting_error = comp.get('line_fitting_error', 0)
+        bend_angle = comp.get('bend_angle', 0)
+        straightness_ratio = comp.get('straightness_ratio', 1.0)
+        
+        # 🔥 多维度加权评分系统
+        curvature_score = 0
+        
+        # 1. 骨架线弯曲度评分 (权重30%)
+        if skeleton_curvature > skeleton_threshold * 1.5:
+            curvature_score += 30
+        elif skeleton_curvature > skeleton_threshold:
+            curvature_score += 15
+        
+        # 2. 轮廓曲率方差评分 (权重25%)
+        if contour_curvature_var > contour_var_threshold * 1.5:
+            curvature_score += 25
+        elif contour_curvature_var > contour_var_threshold:
+            curvature_score += 12
+        
+        # 3. 直线拟合误差评分 (权重25%)
+        if line_fitting_error > fitting_error_threshold * 1.5:
+            curvature_score += 25
+        elif line_fitting_error > fitting_error_threshold:
+            curvature_score += 12
+        
+        # 4. 总弯曲角度评分 (权重15%)
+        if bend_angle > bend_angle_threshold * 1.5:
+            curvature_score += 15
+        elif bend_angle > bend_angle_threshold:
+            curvature_score += 7
+        
+        # 5. 直线度比例评分 (权重5%，反向)
+        if straightness_ratio < straightness_threshold * 0.8:
+            curvature_score += 5
+        elif straightness_ratio < straightness_threshold:
+            curvature_score += 2
+        
+        # 🎯 综合判断（考虑特殊情况）
+        comp['curvature_score'] = curvature_score
+        
+        # 弯曲判断条件
+        is_curved = False
+        curvature_threshold = args.curvature_score_threshold
+        
+        if curvature_score >= curvature_threshold * 1.7:  # 高弯曲度
+            is_curved = True
+        elif curvature_score >= curvature_threshold:  # 中等弯曲度，需要额外验证
+            major_features_count = 0
+            if skeleton_curvature > skeleton_threshold:
+                major_features_count += 1
+            if contour_curvature_var > contour_var_threshold:
+                major_features_count += 1
+            if line_fitting_error > fitting_error_threshold:
+                major_features_count += 1
+            if major_features_count >= 2:
+                is_curved = True
+        
+        # 特殊情况处理
+        aspect_ratio = comp.get('aspect_ratio', 1)
+        if aspect_ratio > 10 and curvature_score >= 25:
+            is_curved = True
+        if straightness_ratio < 0.6:
+            is_curved = True
+        if skeleton_curvature > skeleton_threshold * 2:
+            is_curved = True
+        
+        comp['is_curved'] = is_curved
+        
+        if is_curved:
+            curved_count += 1
+            if args.show_curvature_details:
+                print(f"✓ 弯曲催化剂: 面积={comp['area']}, 弯曲度评分={curvature_score}, "
+                      f"骨架弯曲度={skeleton_curvature:.3f}, 直线度={straightness_ratio:.3f}")
+        else:
+            straight_count += 1
+    
+    print(f"\n🌟 弯曲度分类结果:")
+    print(f"  弯曲催化剂: {curved_count} 个")
+    print(f"  直条状催化剂: {straight_count} 个")
+
 
 
 def classify_anomalies(components_info, image_shape, args):
@@ -712,13 +1092,30 @@ def classify_anomalies(components_info, image_shape, args):
             anomaly_score += 3  # 高分数
             anomaly_reasons.append('short side is too thick (outlier)')
             print(f"检测到过粗组件: 短边={component_short_side:.1f} > 当前图片阈值{outlier_threshold_high:.1f}")
-        elif component_short_side < outlier_threshold_low:
-            # 短边过短（催化剂过细），相对于当前图片内其他催化剂明显过细
-            anomaly_score += 2  # 中等分数
-            anomaly_reasons.append('short side is too thin (outlier)')
-            print(f"检测到过细组件: 短边={component_short_side:.1f} < 当前图片阈值{outlier_threshold_low:.1f}")
+        # elif component_short_side < outlier_threshold_low:
+        #     # 短边过短（催化剂过细），相对于当前图片内其他催化剂明显过细
+        #     anomaly_score += 2  # 中等分数
+        #     anomaly_reasons.append('short side is too thin (outlier)')
+        #     print(f"检测到过细组件: 短边={component_short_side:.1f} < 当前图片阈值{outlier_threshold_low:.1f}")
         
-        # 6. 综合评分判断
+        # 🌟 6. 新增：弯曲度异常检测（如果启用弯曲度分析）
+        if args.enable_curvature_analysis:
+            is_curved = comp.get('is_curved', False)
+            curvature_score = comp.get('curvature_score', 0)
+            
+            # 对严重弯曲的催化剂增加异常分数
+            if is_curved and curvature_score > args.curvature_score_threshold * 2:  # 极度弯曲
+                anomaly_score += 3  # 高异常分数
+                anomaly_reasons.append('extremely curved catalyst')
+                print(f"检测到极度弯曲组件: 弯曲度评分={curvature_score}, 阈值={args.curvature_score_threshold}")
+            elif is_curved and curvature_score > args.curvature_score_threshold * 1.5:  # 严重弯曲
+                anomaly_score += 2  # 中等异常分数
+                anomaly_reasons.append('severely curved catalyst')
+            elif is_curved:  # 轻微弯曲
+                anomaly_score += 1  # 轻微异常分数
+                anomaly_reasons.append('slightly curved catalyst')
+        
+        # 7. 综合评分判断
         comp['anomaly_score'] = anomaly_score
         comp['anomaly_reasons'] = anomaly_reasons
         
@@ -775,10 +1172,10 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     
     # 形态学操作清理掩码
     kernel = np.ones((3, 3), np.uint8)
-    mask_clean = cv2.erode(mask_combined, kernel, iterations=2)
-    mask_clean = cv2.dilate(mask_clean, kernel, iterations=2)
+    mask_clean = cv2.erode(mask_combined, kernel, iterations=1)
     mask_clean = cv2.dilate(mask_clean, kernel, iterations=1)
-    mask_clean = cv2.erode(mask_clean, kernel, iterations=1)
+    # mask_clean = cv2.dilate(mask_clean, kernel, iterations=1)
+    # mask_clean = cv2.erode(mask_clean, kernel, iterations=1)
 
     # 使用开运算去除小的噪声点
     mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
@@ -789,7 +1186,10 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     mask_filtered = filter_small_components(mask_clean, args.min_component_area)
     
     # 连通域分析
-    components_info = analyze_connected_components(mask_filtered)
+    components_info = analyze_connected_components(mask_filtered, args)
+    
+    # 🌟 应用弯曲度分类（在异常分类前进行，为异常检测提供弯曲度信息）
+    apply_curvature_classification(components_info, args)
     
     # 识别并处理UNet误报的大区域，从中提取真正的催化剂
     false_positive_regions = []
@@ -799,10 +1199,9 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     # 智能连通域合并（可选）
     if args.enable_component_merge:
         components_info = merge_connected_components(
-            components_info, args.merge_distance, args.merge_angle_threshold
-        )
+            components_info, args.merge_distance, args.merge_angle_threshold)
     
-    # 异常分类
+    # 异常分类（现在包含弯曲度异常检测）
     classification_result = classify_anomalies(components_info, original_image.shape, args)
     
     return classification_result, mask_filtered, false_positive_regions
@@ -813,6 +1212,7 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
     生成可视化结果
     显示整体催化剂连通域mask叠加效果，用不同颜色标注不同类型
     可选显示误报区域的半透明mask
+    对异常组件显示anomaly_score评分
     """
     vis_image = original_image.copy()
     
@@ -823,18 +1223,21 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
     colors = {
         'foreign_objects': (0, 0, 255),      # 鲜红色 - 异物
         'deformed_catalysts': (0, 128, 255), # 鲜橙色 - 异形催化剂  
-        'normal': (0, 255, 0)                # 鲜绿色 - 正常催化剂
+        'normal': (0, 255, 0),               # 鲜绿色 - 正常催化剂
     }
     
     # 标签文本
     labels = {
         'foreign_objects': 'foreign_objects',
         'deformed_catalysts': 'deformed_catalysts',
-        'normal': 'normal'
+        'normal': 'normal',
     }
     
     # 绘制所有连通域的mask
     for category, components in classification_result.items():
+        if category not in colors:  # 跳过不需要显示的类别
+            continue
+            
         color = colors[category]
         label_text = labels[category]
         
@@ -851,10 +1254,10 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
             rect_points = np.intp(rect_points)
             cv2.drawContours(vis_image, [rect_points], -1, color, 2)
             
-            # 添加异常分数标签
+            # 添加标签信息
             center_x, center_y = comp['center']
             
-            # 只为异常组件（异物和异形催化剂）添加anomaly_score标签
+            # 为异常组件（异物和异形催化剂）添加anomaly_score标签
             if category in ['foreign_objects', 'deformed_catalysts']:
                 anomaly_score = comp.get('anomaly_score', 0)
                 score_text = f"Score:{anomaly_score}"
@@ -932,26 +1335,8 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
     # mask_overlay = cv2.addWeighted(vis_image, 0.6, colored_mask, 0.4, 0)
     mask_overlay = vis_image
     
-    # 添加统计信息背景
-    # stats_bg_height = 100
-    # stats_bg = np.ones((stats_bg_height, mask_overlay.shape[1], 3), dtype=np.uint8) * 240
+
     
-    # 添加统计信息
-    stats_text = [
-        f"detection results:",
-        f"foreign objects: {len(classification_result['foreign_objects'])}",
-        f"deformed catalysts: {len(classification_result['deformed_catalysts'])}",
-        f"normal catalysts: {len(classification_result['normal'])}"
-    ]
-    
-    # for i, text in enumerate(stats_text):
-    #     color = (0, 0, 0) if i == 0 else colors[list(colors.keys())[i-1]] if i <= 3 else (0, 0, 0)
-    #     weight = 2 if i == 0 else 1
-    #     cv2.putText(stats_bg, text, (15, 20 + i*20), 
-    #                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, weight)
-    
-    # 将统计信息叠加到图像顶部
-    # final_result = np.vstack([stats_bg, mask_overlay])
     final_result = mask_overlay
     
     return final_result
@@ -1094,12 +1479,15 @@ def main():
         print(f"  合并角度阈值: {args.merge_angle_threshold}度")
     print(f"  🚀 智能误报过滤: {'启用' if args.enable_false_positive_filter else '禁用'}")
     if args.enable_false_positive_filter:
-        mode_desc = "直接去除" if args.fp_remove_mode == 'remove' else "提取内部组件"
-        print(f"  误报处理模式: {mode_desc}")
+        print(f"  误报处理模式: 直接去除")
         print(f"  误报密度阈值: {args.fp_density_threshold}")
         print(f"  误报面积阈值: {args.fp_area_threshold}")
         print(f"  误报评分阈值: {args.fp_score_threshold}")
         print(f"  误报区域可视化: {'启用' if args.show_false_positive else '禁用'}")
+    print(f"  🌟 弯曲度分析: {'启用' if args.enable_curvature_analysis else '禁用'}")
+    if args.enable_curvature_analysis:
+        print(f"  弯曲度评分阈值: {args.curvature_score_threshold}")
+        print(f"  弯曲度详细信息: {'显示' if args.show_curvature_details else '隐藏'}")
 
 
 if __name__ == '__main__':
