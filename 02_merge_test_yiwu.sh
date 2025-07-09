@@ -67,10 +67,10 @@ FP_SCORE_THRESHOLD=4       # 误报判断综合评分阈值 (1-5, 越小越严�
 
 SHOW_FALSE_POSITIVE=false   # 显示误报区域: true=在结果图中显示误报区域mask, false=不显示
 
-# 🌟 弯曲度分析参数
-ENABLE_CURVATURE_ANALYSIS=true  # 启用弯曲度分析：区分弯曲催化剂和直条状催化剂
-CURVATURE_SCORE_THRESHOLD=35    # 弯曲度判断评分阈值（越小越严格，推荐范围：25-50）
-SHOW_CURVATURE_DETAILS=true     # 显示弯曲度详细信息
+# 🌟 弯曲度分析参数 (优化2特征方案)
+ENABLE_CURVATURE_ANALYSIS=true  # 启用弯曲度分析：基于直线度比例(70%)和骨架线弯曲度(30%)区分弯曲催化剂
+CURVATURE_SCORE_THRESHOLD=50    # 弯曲度判断评分阈值（越小越严格，推荐范围：25-70）
+SHOW_CURVATURE_DETAILS=false     # 显示弯曲度详细信息
 
 # 支持的图像格式
 IMAGE_EXTENSIONS="jpg jpeg png bmp tiff"
@@ -162,6 +162,14 @@ if [ "$ENABLE_FP_FILTER" = "true" ]; then
     echo "  面积阈值: $FP_AREA_THRESHOLD \(像素数，超过此值视为误报\)"
     echo "  综合评分阈值: $FP_SCORE_THRESHOLD \(越小越严格\)"
     echo "  显示误报区域: $SHOW_FALSE_POSITIVE \(true=在结果图中显示, false=不显示\)"
+fi
+echo ""
+print_info "🌟 弯曲度分析参数 (优化2特征方案):"
+echo "  启用弯曲度分析: $ENABLE_CURVATURE_ANALYSIS"
+if [ "$ENABLE_CURVATURE_ANALYSIS" = "true" ]; then
+    echo "  特征方案: 直线度比例\(70%权重\) + 骨架线弯曲度\(30%权重\)"
+    echo "  评分阈值: $CURVATURE_SCORE_THRESHOLD \(推荐范围: 25-70\)"
+    echo "  显示详细信息: $SHOW_CURVATURE_DETAILS"
 fi
 echo ""
 
