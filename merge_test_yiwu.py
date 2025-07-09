@@ -182,8 +182,13 @@ def calculate_skeleton_curvature(component_mask):
     提取催化剂的中轴骨架线，分析其弯曲程度
     """
     try:
-        # 形态学骨架提取
-        skeleton = cv2.ximgproc.thinning(component_mask)
+        # 检查是否有ximgproc模块
+        if hasattr(cv2, 'ximgproc'):
+            # 形态学骨架提取
+            skeleton = cv2.ximgproc.thinning(component_mask)
+        else:
+            # 如果没有ximgproc，直接使用简化算法
+            return calculate_simplified_skeleton_curvature(component_mask)
         
         # 找到骨架线的关键点
         skeleton_points = np.column_stack(np.where(skeleton > 0))
@@ -867,7 +872,7 @@ def classify_anomalies(components_info, image_shape, args):
         # 使用IQR方法定义离群值阈值（针对当前图片）
         if iqr > 0:  # 确保IQR大于0
             outlier_threshold_high = q75 + 1.5 * iqr  # 上界：过粗
-            outlier_threshold_low = max(q25 - 1.5 * iqr, median_short_side * 0.3)  # 下界：过细，但不能太小
+            outlier_threshold_low = max(float(q25 - 1.5 * iqr), float(median_short_side * 0.3))  # 下界：过细，但不能太小
         else:
             # IQR为0，所有值相近，使用更宽松的阈值
             outlier_threshold_high = median_short_side * 2.0
@@ -1098,7 +1103,7 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
             # 绘制最小外接矩形
             min_rect = comp['min_rect']
             rect_points = cv2.boxPoints(min_rect)
-            rect_points = np.intp(rect_points)
+            rect_points = np.int32(rect_points).reshape((-1, 1, 2))
             cv2.drawContours(vis_image, [rect_points], -1, color, 2)
             
             # 添加标签信息
