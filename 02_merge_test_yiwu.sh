@@ -49,7 +49,7 @@ OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0003_0708_advanced_new_add_wq
 MIN_COMPONENT_AREA=500 # 连通域预过滤最小面积阈值
 MIN_AREA=500           # 最小连通域面积阈值
 MAX_AREA=20000         # 最大连通域面积阈值
-MIN_ASPECT_RATIO=1.5   # 最小长宽比阈值
+MIN_ASPECT_RATIO=2.0   # 最小长宽比阈值
 MAX_ASPECT_RATIO=20.0  # 最大长宽比阈值
 MIN_SOLIDITY=0.8       # 最小实心度阈值
 EDGE_THRESHOLD=50      # 边缘区域阈值(像素)=>预设，没有用到
@@ -61,16 +61,12 @@ MERGE_ANGLE_THRESHOLD=30     # 连通域合并角度阈值(度)
 
 # 智能误报过滤参数
 ENABLE_FP_FILTER=true       # 启用智能误报过滤算法 (true/false)
-FP_DENSITY_THRESHOLD=0.4    # 误报判断密度阈值 (0.1-0.8, 越小越严格)
+FP_DENSITY_THRESHOLD=0.5    # 误报判断密度阈值 (0.1-0.8, 越小越严格)
 FP_AREA_THRESHOLD=5000      # 误报判断面积阈值 (绝对像素值, 针对误报大区域)
 FP_SCORE_THRESHOLD=4       # 误报判断综合评分阈值 (1-5, 越小越严格)
 
 SHOW_FALSE_POSITIVE=false   # 显示误报区域: true=在结果图中显示误报区域mask, false=不显示
 
-# 🌟 弯曲度分析参数 (优化2特征方案)
-ENABLE_CURVATURE_ANALYSIS=true  # 启用弯曲度分析：基于直线度比例(70%)和骨架线弯曲度(30%)区分弯曲催化剂
-CURVATURE_SCORE_THRESHOLD=50    # 弯曲度判断评分阈值（越小越严格，推荐范围：25-70）
-SHOW_CURVATURE_DETAILS=false     # 显示弯曲度详细信息
 
 # 支持的图像格式
 IMAGE_EXTENSIONS="jpg jpeg png bmp tiff"
@@ -164,13 +160,7 @@ if [ "$ENABLE_FP_FILTER" = "true" ]; then
     echo "  显示误报区域: $SHOW_FALSE_POSITIVE \(true=在结果图中显示, false=不显示\)"
 fi
 echo ""
-print_info "🌟 弯曲度分析参数 (优化2特征方案):"
-echo "  启用弯曲度分析: $ENABLE_CURVATURE_ANALYSIS"
-if [ "$ENABLE_CURVATURE_ANALYSIS" = "true" ]; then
-    echo "  特征方案: 直线度比例\(70%权重\) + 骨架线弯曲度\(30%权重\)"
-    echo "  评分阈值: $CURVATURE_SCORE_THRESHOLD \(推荐范围: 25-70\)"
-    echo "  显示详细信息: $SHOW_CURVATURE_DETAILS"
-fi
+
 echo ""
 
 # 询问是否继续
@@ -231,17 +221,7 @@ if [ "$ENABLE_FP_FILTER" = "true" ]; then
     fi
 fi
 
-# 添加弯曲度分析参数
-if [ "$ENABLE_CURVATURE_ANALYSIS" = "true" ]; then
-    python_cmd="$python_cmd \
-        --enable-curvature-analysis \
-        --curvature-score-threshold $CURVATURE_SCORE_THRESHOLD"
-    
-    # 添加弯曲度详细信息显示参数
-    if [ "$SHOW_CURVATURE_DETAILS" = "true" ]; then
-        python_cmd="$python_cmd --show-curvature-details"
-    fi
-fi
+
 
 # 记录开始时间
 start_time=$(date +%s)

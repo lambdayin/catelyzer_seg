@@ -48,13 +48,7 @@ def parse_args():
     parser.add_argument('--show-false-positive', action='store_true', default=False,
                        help="显示误报区域：启用时在结果图中以半透明mask显示检测到的误报区域")
     
-    # 🌟 弯曲度分析参数
-    parser.add_argument('--enable-curvature-analysis', action='store_true', default=False,
-                       help="启用弯曲度分析：区分弯曲催化剂和直条状催化剂（默认禁用）")
-    parser.add_argument('--curvature-score-threshold', default=35, type=int,
-                       help="弯曲度判断评分阈值（越小越严格，推荐范围：25-50）")
-    parser.add_argument('--show-curvature-details', action='store_true', default=False,
-                       help="显示弯曲度详细信息：在结果图中显示弯曲度评分和特征值（默认启用）")
+
     
     return parser.parse_args()
 
@@ -145,9 +139,9 @@ def calculate_curvature_features(contour, component_mask):
     """
     🌟 优化算法：简化弯曲度分析
     
-    通过2个核心特征精准区分弯曲催化剂和直条状催化剂：
-    1. 直线度比例 - 端点直线距离与轮廓长度比值（权重70%）
-    2. 骨架线弯曲度 - 基于形态学骨架的弯曲程度（权重30%）
+    通过核心特征精准区分弯曲催化剂和直条状催化剂：
+    1. 直线度比例 - 端点直线距离与轮廓长度比值（权重100%）
+    2. 骨架线弯曲度 - 基于形态学骨架的弯曲程度（暂时禁用，保留计算）
     """
     
     # 确保轮廓有足够的点
@@ -164,10 +158,10 @@ def calculate_curvature_features(contour, component_mask):
     if len(simplified_contour) < 5:
         simplified_contour = contour
     
-    # 1. 🔥 骨架线弯曲度分析（权重30%）
+    # 1. 🔥 骨架线弯曲度分析（暂时禁用，保留计算）
     skeleton_curvature = calculate_skeleton_curvature(component_mask)
     
-    # 2. 🔥 直线度比例分析（权重70%）
+    # 2. 🔥 直线度比例分析（权重100%）
     straightness_ratio = calculate_straightness_ratio(simplified_contour)
     
     return {
@@ -554,8 +548,6 @@ def merge_component_group(component_group):
         except:
             complexity_score = 0
     
-    # 🌟 计算合并后的弯曲度特征
-    curvature_features = calculate_curvature_features(hull, merged_mask)
     
     return {
         'label': component_group[0]['label'],  # 使用第一个组件的标签
@@ -572,12 +564,7 @@ def merge_component_group(component_group):
         'anomaly_reasons': unique_reasons,    # 合并所有异常原因
         # 🚀 新增密度特征
         'bbox_density': bbox_density,
-        'complexity_score': complexity_score,
-        # 🌟 新增弯曲度特征
-        'skeleton_curvature': curvature_features['skeleton_curvature'],
-        'straightness_ratio': curvature_features['straightness_ratio'],
-        'is_curved': False,  # 是否为弯曲催化剂（待分类）
-        'curvature_score': 0  # 弯曲度综合评分
+        'complexity_score': complexity_score
     }
 
 
@@ -641,8 +628,6 @@ def analyze_connected_components(mask, args=None):
             except:
                 complexity_score = 0
         
-        # 🌟 弯曲度分析特征（2特征优化方案）
-        curvature_features = calculate_curvature_features(contour, component_mask)
         
         # 中心点
         moments = cv2.moments(contour)
@@ -667,12 +652,7 @@ def analyze_connected_components(mask, args=None):
             'anomaly_reasons': [],  # 初始化异常原因列表
             # 🚀 新增密度特征
             'bbox_density': bbox_density,  # 最小外接矩形密度
-            'complexity_score': complexity_score,  # 轮廓复杂度评分
-            # 🌟 新增弯曲度特征
-            'skeleton_curvature': curvature_features['skeleton_curvature'],  # 骨架线弯曲度
-            'straightness_ratio': curvature_features['straightness_ratio'],  # 直线度比例
-            'is_curved': False,  # 是否为弯曲催化剂（待分类）
-            'curvature_score': 0  # 弯曲度综合评分
+            'complexity_score': complexity_score  # 轮廓复杂度评分
         }
         
         components_info.append(component_info)
@@ -709,7 +689,6 @@ def is_false_positive_region(component_info, args):
         false_positive_score += 2  # 复杂度
     
     return false_positive_score >= args.fp_score_threshold  # 使用参数化阈值
-
 
 
 def intelligent_component_filtering(components_info, args):
@@ -756,88 +735,6 @@ def intelligent_component_filtering(components_info, args):
     print(f"最终连通域数量: {len(filtered_components)}")
     
     return filtered_components, false_positive_regions
-
-
-def apply_curvature_classification(components_info, args):
-    """
-    🌟 对所有连通域应用弯曲度分类
-    计算动态阈值，更新每个组件的弯曲度分类和评分
-    """
-    if not components_info or not args.enable_curvature_analysis:
-        return
-    
-    # 🔥 动态阈值计算：基于当前图片中所有催化剂的分布
-    all_skeleton_curvatures = [comp.get('skeleton_curvature', 0) for comp in components_info]
-    all_straightness_ratios = [comp.get('straightness_ratio', 1.0) for comp in components_info]
-    
-    # 🔥 使用固定阈值，更稳定可靠
-    # 基于大量催化剂图像的统计分析确定的经验阈值
-    skeleton_threshold = 0.15  # 骨架线弯曲度阈值
-    straightness_threshold = 0.85  # 直线度阈值
-    
-    if args.show_curvature_details:
-        print(f"🌟 弯曲度分类阈值 (固定阈值):")
-        print(f"  骨架线弯曲度阈值: {skeleton_threshold:.3f} (权重30%)")
-        print(f"  直线度比例阈值: {straightness_threshold:.3f} (权重70%)")
-        print(f"  综合评分阈值: {args.curvature_score_threshold}")
-    
-    curved_count = 0
-    straight_count = 0
-    
-    for comp in components_info:
-        # 获取弯曲度特征
-        skeleton_curvature = comp.get('skeleton_curvature', 0)
-        straightness_ratio = comp.get('straightness_ratio', 1.0)
-        
-        # 🔥 优化的评分系统 - 基于2个核心特征
-        curvature_score = 0
-        
-        # 1. 直线度比例评分 (权重70%，最可靠的特征)
-        if straightness_ratio < 0.6:  # 严重弯曲
-            curvature_score += 70
-        elif straightness_ratio < 0.75:  # 中度弯曲
-            curvature_score += 42
-        elif straightness_ratio < 0.85:  # 轻度弯曲
-            curvature_score += 21
-        
-        # 2. 骨架线弯曲度评分 (权重30%)
-        if skeleton_curvature > 0.25:  # 骨架线严重弯曲
-            curvature_score += 30
-        elif skeleton_curvature > 0.15:  # 骨架线中度弯曲
-            curvature_score += 18
-        elif skeleton_curvature > 0.08:  # 骨架线轻度弯曲
-            curvature_score += 9
-        
-        # 🎯 综合判断（考虑特殊情况）
-        comp['curvature_score'] = curvature_score
-        
-        # 🎯 简化的弯曲判断逻辑 - 基于综合评分和关键特征
-        is_curved = False
-        
-        # 主要判断：综合评分超过阈值
-        if curvature_score >= args.curvature_score_threshold:
-            is_curved = True
-        
-        # 补充判断：关键特征异常
-        if straightness_ratio < 0.6:  # 直线度极差
-            is_curved = True
-        elif skeleton_curvature > 0.3:  # 骨架线弯曲度极高
-            is_curved = True
-        
-        comp['is_curved'] = is_curved
-        
-        if is_curved:
-            curved_count += 1
-            if args.show_curvature_details:
-                print(f"✓ 弯曲催化剂: 面积={comp['area']}, 弯曲度评分={curvature_score}, "
-                      f"直线度={straightness_ratio:.3f}, 骨架弯曲度={skeleton_curvature:.3f}")
-        else:
-            straight_count += 1
-    
-    print(f"\n🌟 弯曲度分类结果:")
-    print(f"  弯曲催化剂: {curved_count} 个")
-    print(f"  直条状催化剂: {straight_count} 个")
-
 
 
 def classify_anomalies(components_info, image_shape, args):
@@ -948,24 +845,7 @@ def classify_anomalies(components_info, image_shape, args):
         #     anomaly_reasons.append('short side is too thin (outlier)')
         #     print(f"检测到过细组件: 短边={component_short_side:.1f} < 当前图片阈值{outlier_threshold_low:.1f}")
         
-        # 🌟 6. 新增：弯曲度异常检测（如果启用弯曲度分析）
-        if args.enable_curvature_analysis:
-            is_curved = comp.get('is_curved', False)
-            curvature_score = comp.get('curvature_score', 0)
-            
-            # 对严重弯曲的催化剂增加异常分数
-            if is_curved and curvature_score > args.curvature_score_threshold * 2:  # 极度弯曲
-                anomaly_score += 3  # 高异常分数
-                anomaly_reasons.append('extremely curved catalyst')
-                print(f"检测到极度弯曲组件: 弯曲度评分={curvature_score}, 阈值={args.curvature_score_threshold}")
-            elif is_curved and curvature_score > args.curvature_score_threshold * 1.5:  # 严重弯曲
-                anomaly_score += 2  # 中等异常分数
-                anomaly_reasons.append('severely curved catalyst')
-                print(f"检测到严重弯曲组件: 弯曲度评分={curvature_score}, 阈值={args.curvature_score_threshold}")
-            elif is_curved:  # 轻微弯曲
-                anomaly_score += 1  # 轻微异常分数
-                anomaly_reasons.append('slightly curved catalyst')
-                print(f"检测到轻微弯曲组件: 弯曲度评分={curvature_score}, 阈值={args.curvature_score_threshold}")
+
         
         # 7. 综合评分判断
         comp['anomaly_score'] = anomaly_score
@@ -1040,8 +920,6 @@ def detect_foreign_objects(mask_unet, original_image, mask_eroded, args):
     # 连通域分析
     components_info = analyze_connected_components(mask_filtered, args)
     
-    # 🌟 应用弯曲度分类（在异常分类前进行，为异常检测提供弯曲度信息）
-    apply_curvature_classification(components_info, args)
     
     # 识别并处理UNet误报的大区域，从中提取真正的催化剂
     false_positive_regions = []
@@ -1065,6 +943,10 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
     显示整体催化剂连通域mask叠加效果，用不同颜色标注不同类型
     可选显示误报区域的半透明mask
     对异常组件显示anomaly_score评分
+    
+    显示内容：
+    - 第一行：Score:x（异常评分）
+    - 第二行：[原因代码]
     """
     vis_image = original_image.copy()
     
@@ -1109,8 +991,9 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
             # 添加标签信息
             center_x, center_y = comp['center']
             
-            # 为异常组件（异物和异形催化剂）添加anomaly_score和anomaly_reasons标签
-            if category in ['foreign_objects', 'deformed_catalysts']:
+            # 为异常组件（异物和异形催化剂）和密度较低的正常催化剂添加anomaly_score和anomaly_reasons标签
+            # if category in ['foreign_objects', 'deformed_catalysts'] or (category == 'normal' and comp['bbox_density'] < 0.6 and comp['complexity_score'] > 10):
+            if category in ['foreign_objects', 'deformed_catalysts'] or (category == 'normal' and comp['aspect_ratio'] < 2):
                 anomaly_score = comp.get('anomaly_score', 0)
                 anomaly_reasons = comp.get('anomaly_reasons', [])
                 
@@ -1148,17 +1031,26 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
                 else:
                     reasons_text = "[NO_REASON]"
                 
-                # 分两行显示：第一行显示分数，第二行显示原因
+                # 第三行：详细信息（面积、密度、复杂度）
+                details_text = f"Area:{comp['area']}, Den:{comp['bbox_density']:.2f}, Ar:{comp['aspect_ratio']:.2f}"
+                
+                # 准备显示的文本行
+                text_lines = [score_text, reasons_text, details_text]
+                
+                # 计算所有文字行的尺寸
                 font_scale = 0.6
                 font_thickness = 2
+                line_sizes = []
+                max_width = 0
                 
-                # 计算两行文字的尺寸
-                score_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
-                reasons_size = cv2.getTextSize(reasons_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                for line_text in text_lines:
+                    line_size = cv2.getTextSize(line_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                    line_sizes.append(line_size)
+                    max_width = max(max_width, line_size[0])
                 
-                # 确定背景框的尺寸（取两行文字的最大宽度）
-                max_width = max(score_size[0], reasons_size[0])
-                total_height = score_size[1] + reasons_size[1] + 8  # 8是行间距
+                # 计算总高度（行间距8像素）
+                line_height = line_sizes[0][1] if line_sizes else 20
+                total_height = len(text_lines) * line_height + (len(text_lines) - 1) * 8
                 
                 # 背景框坐标
                 bg_x1 = center_x - max_width//2 - 5
@@ -1170,17 +1062,16 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
                 cv2.rectangle(vis_image, (bg_x1, bg_y1), (bg_x2, bg_y2), (255, 255, 255), -1)
                 cv2.rectangle(vis_image, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 2)
                 
-                # 添加第一行文字：分数
-                score_x = center_x - score_size[0]//2
-                score_y = center_y - reasons_size[1] - 12
-                cv2.putText(vis_image, score_text, (score_x, score_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
-                
-                # 添加第二行文字：原因
-                reasons_x = center_x - reasons_size[0]//2
-                reasons_y = center_y - 8
-                cv2.putText(vis_image, reasons_text, (reasons_x, reasons_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
+                # 逐行添加文字
+                for i, (line_text, line_size) in enumerate(zip(text_lines, line_sizes)):
+                    line_x = center_x - line_size[0]//2
+                    line_y = center_y - total_height + (i + 1) * line_height + i * 8 - 12
+                    
+                    # 使用默认颜色
+                    text_color = color
+                    
+                    cv2.putText(vis_image, line_text, (line_x, line_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thickness)
     
     # 绘制误报区域（如果启用且有误报区域）
     if show_false_positive and false_positive_regions:
@@ -1384,11 +1275,7 @@ def main():
         print(f"  误报面积阈值: {args.fp_area_threshold}")
         print(f"  误报评分阈值: {args.fp_score_threshold}")
         print(f"  误报区域可视化: {'启用' if args.show_false_positive else '禁用'}")
-    print(f"  🌟 弯曲度分析 (2特征方案): {'启用' if args.enable_curvature_analysis else '禁用'}")
-    if args.enable_curvature_analysis:
-        print(f"  特征方案: 直线度比例(70%) + 骨架线弯曲度(30%)")
-        print(f"  弯曲度评分阈值: {args.curvature_score_threshold}")
-        print(f"  弯曲度详细信息: {'显示' if args.show_curvature_details else '隐藏'}")
+
 
 
 if __name__ == '__main__':
