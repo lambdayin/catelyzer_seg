@@ -742,13 +742,9 @@ def classify_anomalies(components_info, image_shape, args):
     优化的异常区域分类：区分正常催化剂、异物、异形
     采用更宽松的判断条件减少误报
     """
-    height, width = image_shape[:2]
     normal_components = []
     foreign_objects = []  # 异物
     deformed_catalysts = []  # 异形催化剂
-    
-    # 计算图像边缘区域
-    edge_threshold = args.edge_threshold
     
     # 🚀 针对当前图片：统计当前图片内所有连通域的最小外接矩形短边分布
     short_sides = []
@@ -834,7 +830,7 @@ def classify_anomalies(components_info, image_shape, args):
         width_rect, height_rect = min_rect[1]
         component_short_side = min(width_rect, height_rect)
         
-        if component_short_side > 2 * outlier_threshold_high:
+        if component_short_side > 1.5 * outlier_threshold_high and comp['bbox_density'] > args.fp_density_threshold:
             # 短边过长（催化剂过粗），相对于当前图片内其他催化剂明显过粗
             anomaly_score += 3  # 高分数
             anomaly_reasons.append('short side is too thick (outlier)')
@@ -993,7 +989,7 @@ def visualize_results(original_image, classification_result, anomaly_mask, false
             
             # 为异常组件（异物和异形催化剂）和密度较低的正常催化剂添加anomaly_score和anomaly_reasons标签
             # if category in ['foreign_objects', 'deformed_catalysts'] or (category == 'normal' and comp['bbox_density'] < 0.6 and comp['complexity_score'] > 10):
-            if category in ['foreign_objects', 'deformed_catalysts'] or (category == 'normal' and comp['aspect_ratio'] < 2):
+            if category in ['foreign_objects', 'deformed_catalysts']:
                 anomaly_score = comp.get('anomaly_score', 0)
                 anomaly_reasons = comp.get('anomaly_reasons', [])
                 
