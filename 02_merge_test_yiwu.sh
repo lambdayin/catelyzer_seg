@@ -43,7 +43,7 @@ MODEL_PATH="./pretrained/twoimages_epoch1000.pth"
 
 # 输入输出目录
 INPUT_DIR="./data/catalyst_merge/origin_data"
-OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0003_0708_advanced_new_add_wq"
+OUTPUT_DIR="./data/catalyst_merge/vis_result_yiwu_v0003_0708_advanced_new_add_wq_new_0714"
 
 # 异物检测参数
 MIN_COMPONENT_AREA=500 # 连通域预过滤最小面积阈值
@@ -66,6 +66,7 @@ FP_AREA_THRESHOLD=5000      # 误报判断面积阈值 (绝对像素值, 针对�
 FP_SCORE_THRESHOLD=4       # 误报判断综合评分阈值 (1-5, 越小越严格)
 
 SHOW_FALSE_POSITIVE=false   # 显示误报区域: true=在结果图中显示误报区域mask, false=不显示
+SHOW_NORMAL_DENSITY=false   # 显示正常催化剂密度: true=在结果图中显示正常催化剂的bbox_density值, false=不显示
 
 
 # 支持的图像格式
@@ -221,6 +222,11 @@ if [ "$ENABLE_FP_FILTER" = "true" ]; then
     fi
 fi
 
+# 添加正常催化剂密度显示参数
+if [ "$SHOW_NORMAL_DENSITY" = "true" ]; then
+    python_cmd="$python_cmd --show-normal-density"
+fi
+
 
 
 # 记录开始时间
@@ -277,6 +283,10 @@ echo "  - 🔴 红色区域: 检测到的异物"
 echo "  - 🟠 橙色区域: 检测到的异形催化剂"
 echo "  - 🟢 绿色区域: 正常催化剂"
 echo "  - 🟣 紫色区域: 误报区域 \(仅在启用SHOW_FALSE_POSITIVE时显示\)"
+echo ""
+echo "📊 标签信息含义："
+echo "  - 异常组件显示: Score + 异常原因 + 详细信息"
+echo "  - 正常催化剂显示: Den:xxx \(bbox_density值，用于后续分析\)"
 echo ""
 echo "📊 可调节参数："
 echo "  - 如需调整检测灵敏度，请修改脚本中的检测参数"
