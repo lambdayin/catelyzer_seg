@@ -1,189 +1,343 @@
-# U-Net: Semantic segmentation with PyTorch
-<a href="#"><img src="https://img.shields.io/github/actions/workflow/status/milesial/PyTorch-UNet/main.yml?logo=github&style=for-the-badge" /></a>
-<a href="https://hub.docker.com/r/milesial/unet"><img src="https://img.shields.io/badge/docker%20image-available-blue?logo=Docker&style=for-the-badge" /></a>
-<a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-v1.13+-red.svg?logo=PyTorch&style=for-the-badge" /></a>
-<a href="#"><img src="https://img.shields.io/badge/python-v3.6+-blue.svg?logo=python&style=for-the-badge" /></a>
+# 催化剂异物异形检测系统
 
-![input and output for a random image in the test dataset](https://i.imgur.com/GD8FcB7.png)
+一个基于深度学习UNet模型的工业催化剂图像分析系统，专门用于检测催化剂中的异物和异形缺陷。
 
+## 📋 项目概述
 
-Customized implementation of the [U-Net](https://arxiv.org/abs/1505.04597) in PyTorch for Kaggle's [Carvana Image Masking Challenge](https://www.kaggle.com/c/carvana-image-masking-challenge) from high definition images.
+本项目是一个完整的工业视觉检测解决方案，主要用于催化剂生产质量控制。系统通过UNet深度学习模型进行图像分割，结合先进的图像处理算法和统计分析方法，实现对催化剂异物和异形的智能检测与分类。
 
-- [Quick start](#quick-start)
-  - [Without Docker](#without-docker)
-  - [With Docker](#with-docker)
-- [Description](#description)
-- [Usage](#usage)
-  - [Docker](#docker)
-  - [Training](#training)
-  - [Prediction](#prediction)
-- [Weights & Biases](#weights--biases)
-- [Pretrained model](#pretrained-model)
-- [Data](#data)
+### 🎯 主要功能
 
-## Quick start
+- **图像分割**: 基于UNet模型的精准像素级分割
+- **异物检测**: 智能识别催化剂中的外来物质
+- **异形检测**: 检测变形、破损的催化剂颗粒
+- **连通域分析**: 深度分析分割区域的几何特征
+- **智能误报过滤**: 采用多重算法减少误检
+- **统计分析**: 全面的数据统计和可视化
+- **批量处理**: 支持大批量图像自动化处理
 
-### Without Docker
+## 🚀 核心特性
 
-1. [Install CUDA](https://developer.nvidia.com/cuda-downloads)
+### 1. 智能检测算法
+- **UNet深度学习模型**: 高精度像素级分割
+- **连通域合并**: 智能合并被分割的单一催化剂
+- **多特征综合判断**: 面积、长宽比、实心度等多维度分析
+- **自适应阈值**: 根据统计分布动态调整检测参数
 
-2. [Install PyTorch 1.13 or later](https://pytorch.org/get-started/locally/)
+### 2. 误报抑制技术  
+- **密度检测**: 基于像素密度的误报识别
+- **形态学分析**: 通过形状特征过滤噪声
+- **评分机制**: 多因子综合评分系统
+- **边缘检测**: 排除图像边缘的干扰区域
 
-3. Install dependencies
+### 3. 可视化与分析
+- **结果可视化**: 直观的检测结果标注和展示
+- **统计报告**: 详细的数据分析和图表生成
+- **批量分析**: 支持大规模数据集的统计分析
+- **导出功能**: 多格式结果数据导出
+
+## 🛠️ 技术栈
+
+- **深度学习框架**: PyTorch
+- **计算机视觉**: OpenCV
+- **数据处理**: NumPy, SciPy
+- **可视化**: Matplotlib, Seaborn
+- **实验管理**: Weights & Biases (wandb)
+- **数据格式**: LMDB, PIL/Pillow
+- **开发语言**: Python 3.x
+
+## 📦 安装配置
+
+### 环境要求
+
+- Python >= 3.7
+- CUDA >= 10.0 (GPU加速，可选)
+- 内存 >= 8GB
+- 显存 >= 4GB (使用GPU时)
+
+### 安装步骤
+
+1. **克隆项目**
+```bash
+git clone <project-url>
+cd catelyzer_seg
+```
+
+2. **安装依赖**
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Download the data and run training:
+3. **准备预训练模型**
 ```bash
-bash scripts/download_data.sh
-python train.py --amp
+# 将预训练模型放置到 pretrained/ 目录
+mkdir -p pretrained
+# 下载或复制模型文件到 pretrained/twoimages_epoch1000.pth
 ```
 
-### With Docker
-
-1. [Install Docker 19.03 or later:](https://docs.docker.com/get-docker/)
+4. **Docker部署 (可选)**
 ```bash
-curl https://get.docker.com | sh && sudo systemctl --now enable docker
+docker build -t catalyst-detector .
+docker run --gpus all -v $(pwd):/workspace/unet catalyst-detector
 ```
-2. [Install the NVIDIA container toolkit:](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+## 🎮 使用方法
+
+### 1. 异物异形检测
+
+使用主检测脚本进行催化剂异物异形检测：
+
 ```bash
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
-   && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - \
-   && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-sudo apt-get update
-sudo apt-get install -y nvidia-docker2
-sudo systemctl restart docker
+# 基础检测
+python merge_test_yiwu.py pretrained/twoimages_epoch1000.pth \
+  --input-dir ./data/test_images \
+  --output-dir ./results
+
+# 使用预配置脚本
+bash 02_merge_test_yiwu.sh
 ```
-3. [Download and run the image:](https://hub.docker.com/repository/docker/milesial/unet)
+
+#### 主要参数说明
+
+**检测参数**:
+- `--min-component-area`: 连通域最小面积阈值 (默认: 500)
+- `--min-area`: 异物最小面积 (默认: 500)  
+- `--max-area`: 异物最大面积 (默认: 20000)
+- `--min-aspect-ratio`: 最小长宽比 (默认: 2.0)
+- `--max-aspect-ratio`: 最大长宽比 (默认: 20.0)
+- `--min-solidity`: 最小实心度 (默认: 0.8)
+
+**智能合并参数**:
+- `--enable-component-merge`: 启用连通域智能合并
+- `--merge-distance`: 合并距离阈值 (默认: 20)
+- `--merge-angle-threshold`: 合并角度阈值 (默认: 30度)
+
+**误报过滤参数**:
+- `--enable-false-positive-filter`: 启用智能误报过滤
+- `--fp-density-threshold`: 密度阈值 (默认: 0.4)
+- `--fp-area-threshold`: 面积阈值 (默认: 150000)
+- `--fp-score-threshold`: 评分阈值 (默认: 3)
+
+### 2. 区域分析
+
+进行详细的连通域统计分析：
+
 ```bash
-sudo docker run --rm --shm-size=8g --ulimit memlock=-1 --gpus all -it milesial/unet
+python area_analysis.py pretrained/twoimages_epoch1000.pth \
+  --input-dir ./data/test_images \
+  --output-dir ./analysis_results \
+  --enable-false-positive-filter \
+  --enable-component-merge
 ```
 
-4. Download the data and run training:
+### 3. 模型训练
+
+训练新的UNet模型：
+
 ```bash
-bash scripts/download_data.sh
-python train.py --amp
+# 基础训练
+python train.py --epochs 100 --batch-size 2 --learning-rate 1e-4
+
+# 催化剂专用训练
+python train_catelyzer.py --data-dir ./data/training --epochs 200
 ```
 
-## Description
-This model was trained from scratch with 5k images and scored a [Dice coefficient](https://en.wikipedia.org/wiki/S%C3%B8rensen%E2%80%93Dice_coefficient) of 0.988423 on over 100k test images.
+### 4. 单张图像预测
 
-It can be easily used for multiclass segmentation, portrait segmentation, medical segmentation, ...
+对单张图像进行预测：
 
-
-## Usage
-**Note : Use Python 3.6 or newer**
-
-### Docker
-
-A docker image containing the code and the dependencies is available on [DockerHub](https://hub.docker.com/repository/docker/milesial/unet).
-You can download and jump in the container with ([docker >=19.03](https://docs.docker.com/get-docker/)):
-
-```console
-docker run -it --rm --shm-size=8g --ulimit memlock=-1 --gpus all milesial/unet
+```bash
+python predict.py --model pretrained/twoimages_epoch1000.pth \
+  --input image.jpg --output result.png --viz
 ```
 
+## 📊 输出结果
 
-### Training
+### 1. 检测结果文件
 
-```console
-> python train.py -h
-usage: train.py [-h] [--epochs E] [--batch-size B] [--learning-rate LR]
-                [--load LOAD] [--scale SCALE] [--validation VAL] [--amp]
+- **可视化图像**: 标注了检测结果的原图
+- **统计数据**: CSV格式的详细检测数据
+- **分析报告**: 包含统计图表的综合报告
 
-Train the UNet on images and target masks
+### 2. 文件结构示例
 
-optional arguments:
-  -h, --help            show this help message and exit
-  --epochs E, -e E      Number of epochs
-  --batch-size B, -b B  Batch size
-  --learning-rate LR, -l LR
-                        Learning rate
-  --load LOAD, -f LOAD  Load model from a .pth file
-  --scale SCALE, -s SCALE
-                        Downscaling factor of the images
-  --validation VAL, -v VAL
-                        Percent of the data that is used as validation (0-100)
-  --amp                 Use mixed precision
+```
+results/
+├── vis_images/           # 可视化结果图像
+│   ├── image1_result.jpg
+│   └── image2_result.jpg
+├── statistics/           # 统计数据
+│   ├── detection_summary.csv
+│   └── component_details.csv
+└── analysis/            # 分析报告
+    ├── distribution_plots.png
+    └── statistical_report.html
 ```
 
-By default, the `scale` is 0.5, so if you wish to obtain better results (but use more memory), set it to 1.
+### 3. 检测类别
 
-Automatic mixed precision is also available with the `--amp` flag. [Mixed precision](https://arxiv.org/abs/1710.03740) allows the model to use less memory and to be faster on recent GPUs by using FP16 arithmetic. Enabling AMP is recommended.
+- **正常催化剂**: 符合规格的正常颗粒
+- **异物**: 非催化剂的外来物质
+- **异形**: 变形、破损的催化剂颗粒
 
+## 🔧 配置文件
 
-### Prediction
-
-After training your model and saving it to `MODEL.pth`, you can easily test the output masks on your images via the CLI.
-
-To predict a single image and save it:
-
-`python predict.py -i image.jpg -o output.jpg`
-
-To predict a multiple images and show them without saving them:
-
-`python predict.py -i image1.jpg image2.jpg --viz --no-save`
-
-```console
-> python predict.py -h
-usage: predict.py [-h] [--model FILE] --input INPUT [INPUT ...] 
-                  [--output INPUT [INPUT ...]] [--viz] [--no-save]
-                  [--mask-threshold MASK_THRESHOLD] [--scale SCALE]
-
-Predict masks from input images
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --model FILE, -m FILE
-                        Specify the file in which the model is stored
-  --input INPUT [INPUT ...], -i INPUT [INPUT ...]
-                        Filenames of input images
-  --output INPUT [INPUT ...], -o INPUT [INPUT ...]
-                        Filenames of output images
-  --viz, -v             Visualize the images as they are processed
-  --no-save, -n         Do not save the output masks
-  --mask-threshold MASK_THRESHOLD, -t MASK_THRESHOLD
-                        Minimum probability value to consider a mask pixel white
-  --scale SCALE, -s SCALE
-                        Scale factor for the input images
-```
-You can specify which model file to use with `--model MODEL.pth`.
-
-## Weights & Biases
-
-The training progress can be visualized in real-time using [Weights & Biases](https://wandb.ai/).  Loss curves, validation curves, weights and gradient histograms, as well as predicted masks are logged to the platform.
-
-When launching a training, a link will be printed in the console. Click on it to go to your dashboard. If you have an existing W&B account, you can link it
- by setting the `WANDB_API_KEY` environment variable. If not, it will create an anonymous run which is automatically deleted after 7 days.
-
-
-## Pretrained model
-A [pretrained model](https://github.com/milesial/Pytorch-UNet/releases/tag/v3.0) is available for the Carvana dataset. It can also be loaded from torch.hub:
+### 主要配置类 (DetectionConfig)
 
 ```python
-net = torch.hub.load('milesial/Pytorch-UNet', 'unet_carvana', pretrained=True, scale=0.5)
+@dataclass
+class DetectionConfig:
+    # 图像处理参数
+    YUV_BRIGHTNESS_THRESHOLD: int = 15
+    UNET_SCALE_FACTOR: float = 0.5
+    
+    # 连通域过滤参数  
+    MIN_CONTOUR_POINTS: int = 10
+    MIN_COMPONENT_FOR_ORIENTATION: int = 5
+    
+    # 形态学参数
+    EROSION_KERNEL_SIZE: Tuple[int, int] = (3, 3)
+    DILATION_KERNEL_SIZE: Tuple[int, int] = (5, 5)
+    
+    # 几何特征阈值
+    MIN_CONTOUR_LENGTH: int = 3
+    CURVATURE_SCALE_FACTOR: float = 50
 ```
-Available scales are 0.5 and 1.0.
 
-## Data
-The Carvana data is available on the [Kaggle website](https://www.kaggle.com/c/carvana-image-masking-challenge/data).
-
-You can also download it using the helper script:
+## 📁 项目结构
 
 ```
-bash scripts/download_data.sh
+catelyzer_seg/
+├── merge_test_yiwu.py      # 主检测系统
+├── area_analysis.py        # 区域分析工具
+├── train.py               # UNet训练脚本
+├── predict.py             # 预测脚本
+├── evaluate.py            # 模型评估
+├── requirements.txt       # 依赖列表
+├── Dockerfile            # Docker配置
+├── unet/                 # UNet模型定义
+│   ├── unet_model.py
+│   └── unet_parts.py
+├── utils/                # 工具函数
+│   ├── data_loading.py   # 数据加载
+│   ├── dice_score.py     # 损失函数
+│   └── utils.py          # 通用工具
+├── datasets/             # 数据集处理
+├── scripts/              # 辅助脚本
+│   ├── 01_merge_test.sh  # 长度测量脚本
+│   └── 02_merge_test_yiwu.sh  # 异物检测脚本
+├── data/                 # 数据目录
+└── pretrained/           # 预训练模型
 ```
 
-The input images and target masks should be in the `data/imgs` and `data/masks` folders respectively (note that the `imgs` and `masks` folder should not contain any sub-folder or any other files, due to the greedy data-loader). For Carvana, images are RGB and masks are black and white.
+## 🔬 算法原理
 
-You can use your own dataset as long as you make sure it is loaded properly in `utils/data_loading.py`.
+### 1. UNet分割网络
+- **编码器-解码器结构**: 有效提取多尺度特征
+- **跳跃连接**: 保留细节信息
+- **像素级预测**: 精确的边界分割
 
+### 2. 连通域分析
+- **轮廓提取**: 基于OpenCV的轮廓检测
+- **特征计算**: 面积、周长、长宽比、实心度等
+- **形态学处理**: 开运算、闭运算优化分割结果
+
+### 3. 智能合并算法
+- **距离判断**: 基于质心距离的邻近性分析
+- **角度约束**: 主轴方向的一致性检验
+- **面积比例**: 避免错误合并不同大小的区域
+
+### 4. 误报过滤机制
+- **密度特征**: 基于最小外接矩形的像素密度
+- **形状复杂度**: 轮廓复杂性分析
+- **综合评分**: 多因子加权评分系统
+
+## ⚡ 性能优化
+
+### 1. GPU加速
+- 支持CUDA GPU加速推理
+- 自动检测可用GPU设备
+- 内存优化的批处理
+
+### 2. 数据处理优化
+- LMDB数据库支持大规模数据
+- 多进程数据加载
+- 内存映射减少IO开销
+
+### 3. 算法优化
+- 向量化数学运算
+- 高效的图像处理算法
+- 智能缓存机制
+
+## 🐛 故障排除
+
+### 常见问题
+
+1. **CUDA内存不足**
+   ```bash
+   # 降低批处理大小或使用CPU
+   export CUDA_VISIBLE_DEVICES=""
+   ```
+
+2. **模型加载失败**
+   ```bash
+   # 检查模型文件路径和完整性
+   ls -la pretrained/twoimages_epoch1000.pth
+   ```
+
+3. **依赖包冲突**
+   ```bash
+   # 使用虚拟环境
+   python -m venv catalyst_env
+   source catalyst_env/bin/activate
+   pip install -r requirements.txt
+   ```
+
+### 日志调试
+
+```bash
+# 启用详细日志
+python merge_test_yiwu.py --log-level DEBUG
+```
+
+## 📈 更新日志
+
+### v2.0 (最新)
+- ✅ 新增智能连通域合并功能
+- ✅ 优化误报过滤算法
+- ✅ 增强可视化效果
+- ✅ 支持批量统计分析
+
+### v1.0
+- ✅ 基础UNet分割功能
+- ✅ 连通域特征提取
+- ✅ 简单异常检测
+
+## 🤝 贡献指南
+
+1. Fork本项目
+2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启Pull Request
+
+## 📄 许可证
+
+本项目使用GNU General Public License v3.0许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+
+## 📧 联系方式
+
+如有问题或建议，请通过以下方式联系：
+
+- 项目Issues: [GitHub Issues](项目GitHub地址/issues)
+- 邮箱: your-email@example.com
+
+## 🙏 致谢
+
+- PyTorch团队提供的深度学习框架
+- OpenCV社区的计算机视觉支持
+- 所有贡献者和测试用户的宝贵反馈
 
 ---
 
-Original paper by Olaf Ronneberger, Philipp Fischer, Thomas Brox:
-
-[U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597)
-
-![network architecture](https://i.imgur.com/jeDVpqF.png)
+*本项目致力于工业质量检测的智能化升级，为催化剂生产提供可靠的视觉检测解决方案。* 
